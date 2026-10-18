@@ -91,6 +91,11 @@ export type Thread = {
   commitsSince: number
   addressedBy: string | null
   url: string | null
+  body: string
+  lastReplyBody: string | null
+  triggerSha: string | null
+  triggerAt: string
+  responseSeconds: number | null
 }
 
 export type Commit = {
@@ -113,10 +118,46 @@ export type Activity = {
 
 export type PrDetail = PrSummary & {
   fetchedAt: number
+  state: 'OPEN' | 'MERGED' | 'CLOSED'
+  mergedAt: string | null
+  closedAt: string | null
   threads: Thread[]
   commits: Commit[]
   activity: Activity[]
 }
+
+export type Outcome = 'used' | 'dismissed' | 'resolved' | 'open'
+
+export type BotStats = {
+  bot: string
+  findings: number
+  prs: number
+  used: number
+  dismissed: number
+  resolved: number
+  open: number
+  usedRate: number | null
+  medianResponseSeconds: number | null
+  duplicated: number
+  unique: number
+  severities: Record<string, number>
+}
+
+export type PairStats = { botA: string; botB: string; same: number; judged: number; unjudged: number }
+
+export type StatsReport = {
+  repo: string | null
+  sinceDays: number | null
+  generatedAt: number
+  totalThreads: number
+  totalPrs: number
+  bots: BotStats[]
+  pairs: PairStats[]
+  unjudgedPairs: number
+}
+
+export type BackfillProgress = { running: boolean; done: number; total: number; message: string }
+
 
 export type SettledPr = {
   number: number
@@ -140,6 +181,10 @@ declare module 'claude-code' {
       error: string | null
       isLoading: boolean
       settled: SettledPr[]
+      mode: 'prs' | 'stats'
+      stats: StatsReport | null
+      backfill: BackfillProgress | null
+      dbPath: string | null
     }
   }
 }

@@ -3,7 +3,8 @@
 
 import type { Elements } from 'claude-code'
 
-import type { Check, PrDetail, PrSummary, RuleSummary, SettledPr, Snapshot, Thread } from '../types'
+import type { BackfillProgress, Check, PrDetail, PrSummary, RuleSummary, SettledPr, Snapshot, StatsReport, Thread } from '../types'
+import { fmtSeconds, pct } from './db.ts'
 import { ago, bar, checkTotals, displayName, glyph, mergeStateWords, reviewWords, truncate } from './github.ts'
 
 export type Table = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button' | 'Link'>
@@ -12,6 +13,8 @@ export type Actions = {
   select: (number: number) => void
   back: () => void
   refresh: () => void
+  stats: () => void
+  judge: () => void
 }
 
 export type ListData = {
@@ -23,6 +26,16 @@ export type ListData = {
   now: number
   width: number
   selected: number | null
+  progress: BackfillProgress | null
+}
+
+export type StatsData = {
+  repo: string | null
+  stats: StatsReport | null
+  progress: BackfillProgress | null
+  error: string | null
+  now: number
+  width: number
 }
 
 export type DetailData = {
@@ -59,9 +72,14 @@ export function renderList(t: Table, d: ListData, a: Actions) {
         {snap ? <Text dimColor> · {snap.totalCount} open PR{snap.totalCount === 1 ? '' : 's'} · {ago(snap.fetchedAt, d.now)} ago</Text> : null}
         {d.isLoading ? <Text color="warning"> ⟳</Text> : null}
       </Text>
-      <Button key="refresh" hotkey="r" plain onPress={a.refresh}>
-        refresh
-      </Button>
+      <Box flexDirection="row" gap={1}>
+        <Button key="stats" hotkey="s" plain onPress={a.stats}>
+          stats
+        </Button>
+        <Button key="refresh" hotkey="r" plain onPress={a.refresh}>
+          refresh
+        </Button>
+      </Box>
     </Box>
   )
 
@@ -88,8 +106,9 @@ export function renderList(t: Table, d: ListData, a: Actions) {
       {rows}
       {snap?.rules ? renderRules(t, snap.rules, W) : null}
       {d.settled.length > 0 ? renderSettled(t, d.settled, d.now, W) : null}
+      {d.progress?.running ? <Text color="warning" wrap="truncate-end">backfill: {d.progress.message}</Text> : null}
       <Text dimColor wrap="truncate-end">
-        press a number to drill in · /prs N · /prs refresh · /prs repo owner/name
+        digits drill in · s stats · /prs N · /prs refresh · /prs backfill 30 · /prs repo owner/name
       </Text>
     </Box>
   )
@@ -404,5 +423,83 @@ function renderThread(t: Table, th: Thread, now: number, W: number) {
       {'  '}{truncate(th.title, Math.max(10, W - 40))}
       <Text color={status.tone}> · {status.text}</Text>
     </Text>
+  )
+}
+
+export function renderStats(t: Table, d: StatsData, a: Actions) {
+  const { Box, Text, Button } = t
+  const W = Math.max(20, d.width)
+  const r = d.stats
+  const narrow = W < 100
+  return (
+    <Box flexDirection="column">
+      <Box key="head" flexDirection="row" justifyContent="space-between">
+        <Box flexDirection="row">
+          <Button key="back" hotkey="b" plain onPress={a.back}>
+            ‹ PRs
+          </Button>
+          <Text wrap="truncate-end">
+            {'  '}
+            <Text weight="bold">review bots</Text>
+            <Text dimColor> · {d.repo ?? 'all repos'}{r?.sinceDays ? ` · last ${r.sinceDays} days` : ''}</Text>
+          </Text>
+        </Box>
+        <Box flexDirection="row" gap={1}>
+          {r && r.unjudgedPairs > 0 ? (
+            <Button key="judge" hotkey="j" plain onPress={a.judge}>
+              judge {r.unjudgedPairs}
+            </Button>
+          ) : null}
+          <Button key="refresh" hotkey="r" plain onPress={a.stats}>
+            refresh
+          </Button>
+        </Box>
+      </Box>
+      {d.progress ? (
+        <Text color={d.progress.running ? 'warning' : 'subtle'} wrap="truncate-end">
+          backfill {d.progress.running ? '⟳ ' : ''}{d.progress.total ? `${d.progress.done}/${d.progress.total} · ` : ''}{d.progress.message}
+        </Text>
+      ) : null}
+      {d.error ? <Text color="error" wrap="truncate-end">{d.error}</Text> : null}
+      {!r ? <Text dimColor>No stats computed yet. /prs stats, or /prs backfill 30 to sweep merged PRs into the ledger.</Text> : null}
+      {r && r.bots.length === 0 ? <Text dimColor>No bot review threads on record. Drill into a PR, or /prs backfill 30.</Text> : null}
+      {r && r.bots.length > 0 ? (
+        <Text dimColor wrap="truncate-end">
+          {r.totalThreads} findings across {r.totalPrs} PRs · computed {ago(r.generatedAt, d.now)} ago
+        </Text>
+      ) : null}
+      {r && r.bots.length > 0 ? (
+        <Text dimColor wrap="truncate-end">
+          {'\n'}{'bot'.padEnd(17)} {'found'.padStart(5)} {'PRs'.padStart(4)} {'used'.padStart(5)} {'dismis'.padStart(6)} {'unk'.padStart(4)} {'open'.padStart(4)} {'used%'.padStart(5)} {'resp'.padStart(6)} {'uniq'.padStart(5)} {'dup'.padStart(4)}
+        </Text>
+      ) : null}
+      {(r?.bots ?? []).map(b => (
+        <Text key={`bot-${b.bot}`} wrap="truncate-end">
+          <Text weight="bold">{truncate(b.bot, 17).padEnd(17)}</Text> {String(b.findings).padStart(5)} {String(b.prs).padStart(4)}{' '}
+          <Text color="success">{String(b.used).padStart(5)}</Text> <Text color="error">{String(b.dismissed).padStart(6)}</Text>{' '}
+          <Text dimColor>{String(b.resolved).padStart(4)}</Text> <Text color="warning">{String(b.open).padStart(4)}</Text>{' '}
+          <Text color={b.usedRate !== null && b.usedRate >= 0.6 ? 'success' : b.usedRate !== null && b.usedRate < 0.3 ? 'error' : undefined}>{pct(b.usedRate).padStart(5)}</Text>{' '}
+          {fmtSeconds(b.medianResponseSeconds).padStart(6)} {String(b.unique).padStart(5)} <Text color={b.duplicated > b.unique ? 'warning' : undefined}>{String(b.duplicated).padStart(4)}</Text>
+        </Text>
+      ))}
+      {(r?.bots ?? []).map(b => (
+        <Text key={`sev-${b.bot}`} dimColor wrap="truncate-end">
+          {'  '}{truncate(b.bot, 17)}: severities {Object.entries(b.severities).sort((x, y) => y[1] - x[1]).map(([k, n]) => `${k} ${n}`).join(' · ')}
+        </Text>
+      ))}
+      {r && r.pairs.length > 0 ? (
+        <Text weight="bold">{'\n'}overlap between bots <Text dimColor weight="regular">same finding on the same file, judged by the model</Text></Text>
+      ) : null}
+      {(r?.pairs ?? []).map(p => (
+        <Text key={`pair-${p.botA}-${p.botB}`} wrap="truncate-end">
+          {'  '}{p.botA} × {p.botB}: <Text color={p.judged && p.same / p.judged > 0.4 ? 'warning' : undefined}>{p.same} same</Text> of {p.judged} judged
+          {p.unjudged ? <Text dimColor> · {p.unjudged} unjudged</Text> : null}
+        </Text>
+      ))}
+      <Text dimColor wrap={narrow ? 'wrap' : 'truncate-end'}>
+        {'\n'}used = code moved after it (commit touched the file, diff outdated, or reply says fixed) · dismissed = reply says no, no change · unk = resolved, no evidence · resp = median time from push to comment
+      </Text>
+      <Text dimColor wrap="truncate-end">b back · j judge pending pairs · r recompute · /prs stats 30 · /prs stats all all-repos · /prs db</Text>
+    </Box>
   )
 }

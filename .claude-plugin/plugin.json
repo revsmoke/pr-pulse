@@ -1,7 +1,7 @@
 {
   "name": "pr-pulse",
-  "version": "0.1.0",
-  "description": "Live pane of a repo's open pull requests: checks, review bots, enforced rules, review threads and the commits that address them, and which agents are working on each PR.",
+  "version": "0.2.0",
+  "description": "Live pane of a repo's open pull requests (checks, review bots, enforced rules, review threads and the commits that address them, the agents at work) plus a SQLite ledger of review-bot findings with per-bot usefulness and overlap stats.",
   "author": {
     "name": "Bryan Rice"
   },
@@ -30,6 +30,12 @@
       "description": "Toast when a check fails, a reviewer leaves new threads, or a PR merges.",
       "default": true,
       "title": "Toasts on changes"
+    },
+    "dbPath": {
+      "type": "string",
+      "title": "Ledger database path",
+      "description": "Where the SQLite ledger of review-bot findings is kept. Empty means ~/.claude/pr-pulse/reviews.db.",
+      "default": ""
     }
   }
 }

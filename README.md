@@ -20,6 +20,13 @@ For each PR it shows, refreshed on a timer and right after Claude runs
   trailers and bot logins
 - recently merged or closed PRs and whether their branch was deleted
 
+It also keeps a **review-bot ledger** in SQLite (`~/.claude/pr-pulse/reviews.db`
+by default): every bot finding with its severity, response time, whether the
+code moved after it, and whether another bot raised the same thing. `/prs stats`
+answers "is this bot earning its keep?" per bot: findings, used vs dismissed,
+median time from push to comment, unique vs duplicated findings, and the
+overlap between each pair of bots as judged by a cheap model call.
+
 ## Commands
 
 | Command | Does |
@@ -30,8 +37,32 @@ For each PR it shows, refreshed on a timer and right after Claude runs
 | `/prs refresh` | fetch now |
 | `/prs close` | close the pane |
 | `/prs repo owner/name` | watch another repository |
+| `/prs stats [days\|all] [all-repos]` | per-bot usefulness and overlap report, also drawn in the pane |
+| `/prs backfill [N]` | sweep the last N merged or closed PRs (default 30) into the ledger, in the background |
+| `/prs judge [N]` | settle up to N unjudged "same finding?" pairs with the model |
+| `/prs db` | print the ledger's path |
 
-In the pane: digits `1`–`9` open a PR, `b` goes back, `r` refreshes.
+In the pane: digits `1`–`9` open a PR, `b` goes back, `r` refreshes, `s` shows
+the stats view, `j` judges pending pairs.
+
+## How the ledger scores a finding
+
+- **used**: the thread was resolved and the code moved after it: the first
+  commit after the comment touched its file, the diff under it went outdated,
+  or the reply says fixed/done/applied.
+- **dismissed**: resolved with a reply like won't fix, false positive, by
+  design, and no code change.
+- **unknown**: resolved with no evidence either way.
+- **open**: still unresolved.
+- **response**: seconds from the commit the comment is anchored on (or the PR
+  opening) to the comment.
+- **duplicated**: another bot commented on the same file within 8 lines and the
+  model judged the two comments to report the same issue.
+
+The ledger is written whenever the pane loads a PR's detail, when the poller
+sees an open PR change, when a PR settles, and by `/prs backfill`. Query it
+with `sqlite3 ~/.claude/pr-pulse/reviews.db` (tables `prs`, `commits`,
+`threads`, `thread_pairs`).
 
 ## Settings
 
@@ -42,6 +73,8 @@ toasts on changes (a failed check, new review threads, an approval, a merge).
 ## Requirements
 
 - `gh` on PATH and signed in (`gh auth status`)
+- `sqlite3` on PATH (ships with macOS) for the ledger; without it the pane
+  still works and ledger writes are skipped
 - Claude Code 2.1.302 or later (tested with 2.1.302)
 
 ## Install

@@ -17,7 +17,7 @@ import type {
 // ---------- queries ----------
 
 const PR_SUMMARY_FIELDS = `
-  number title isDraft mergeable mergeStateStatus reviewDecision headRefName baseRefName
+  number title isDraft state mergedAt closedAt mergeable mergeStateStatus reviewDecision headRefName baseRefName
   updatedAt createdAt url additions deletions changedFiles
   author { login __typename }
   autoMergeRequest { enabledAt }
@@ -55,6 +55,15 @@ query($owner: String!, $name: String!) {
     pullRequests(states: OPEN, first: 20, orderBy: { field: UPDATED_AT, direction: DESC }) {
       totalCount
       nodes { ${PR_SUMMARY_FIELDS} }
+    }
+  }
+}`
+
+export const SETTLED_QUERY = `
+query($owner: String!, $name: String!, $count: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: [MERGED, CLOSED], first: $count, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      nodes { number state updatedAt }
     }
   }
 }`
@@ -212,6 +221,9 @@ type RawPr = {
   number: number
   title: string
   isDraft: boolean
+  state?: 'OPEN' | 'MERGED' | 'CLOSED'
+  mergedAt?: string | null
+  closedAt?: string | null
   mergeable: string
   mergeStateStatus: string
   reviewDecision: string | null
@@ -489,7 +501,18 @@ export function parseDetail(json: string, fetchedAt: number, rules: RuleSummary 
     // The first commit pushed after the thread opened is the one most likely
     // to have addressed it; a resolved thread is credited to that commit.
     const addressedBy = t.isResolved || replies.length > 0 ? after[0]?.sha ?? null : null
+    // What the bot was reacting to: the commit its comment is anchored on, or
+    // the PR's opening when that commit predates the PR.
+    const triggerSha = first?.commit?.abbreviatedOid ?? null
+    const triggerCommitAt = commits.find(c => c.sha === triggerSha)?.at ?? null
+    const triggerAt = triggerCommitAt && triggerCommitAt > pr.createdAt ? triggerCommitAt : pr.createdAt
+    const responseMs = Date.parse(openedAt) - Date.parse(triggerAt)
     return {
+      body: squash(first?.body ?? ''),
+      lastReplyBody: last ? squash(last.body) : null,
+      triggerSha,
+      triggerAt,
+      responseSeconds: Number.isFinite(responseMs) && responseMs >= 0 ? Math.round(responseMs / 1000) : null,
       id: t.id,
       path: t.path,
       line: t.line ?? t.originalLine ?? null,
@@ -555,7 +578,27 @@ export function parseDetail(json: string, fetchedAt: number, rules: RuleSummary 
     if (login && isBotLogin(login, c.author?.__typename)) agents.add(displayName(login, c.author?.__typename))
   }
 
-  return { ...summary, agents: [...agents], fetchedAt, threads, commits: commits.slice().reverse(), activity: folded.slice(0, 12) }
+  return {
+    ...summary,
+    agents: [...agents],
+    fetchedAt,
+    state: pr.state ?? 'OPEN',
+    mergedAt: pr.mergedAt ?? null,
+    closedAt: pr.closedAt ?? null,
+    threads,
+    commits: commits.slice().reverse(),
+    activity: folded.slice(0, 12),
+  }
+}
+
+export function squash(text: string): string {
+  return text.replace(/<!--[\s\S]*?-->/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 600)
+}
+
+export function parseSettledNumbers(json: string): number[] {
+  const parsed = JSON.parse(json) as { data?: { repository?: { pullRequests?: { nodes: { number: number }[] } } | null }; errors?: { message: string }[] }
+  if (parsed.errors?.length) throw new Error(parsed.errors.map(e => e.message).join('; '))
+  return (parsed.data?.repository?.pullRequests?.nodes ?? []).map(n => n.number)
 }
 
 // ---------- presentation helpers (pure) ----------
