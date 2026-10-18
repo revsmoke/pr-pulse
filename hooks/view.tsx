@@ -478,7 +478,7 @@ export function renderStats(t: Table, d: StatsData, a: Actions) {
       ) : null}
       {r && r.bots.length > 0 ? (
         <Text dimColor wrap="truncate-end">
-          {'\n'}{'bot'.padEnd(17)} {'found'.padStart(5)} {'PRs'.padStart(4)} {'used'.padStart(5)} {'code✓'.padStart(5)} {'dismis'.padStart(6)} {'unk'.padStart(4)} {'open'.padStart(4)} {'used%'.padStart(5)} {'resp'.padStart(6)} {'uniq'.padStart(5)} {'dup'.padStart(4)} {'1st'.padStart(4)} {'rep'.padStart(4)}
+          {'\n'}{'bot'.padEnd(17)} {'found'.padStart(5)} {'PRs'.padStart(4)} {'used'.padStart(5)} {'code✓'.padStart(5)} {'dismis'.padStart(6)} {'unk'.padStart(4)} {'open'.padStart(4)} {'used%'.padStart(5)} {'resp'.padStart(6)} {'uniq'.padStart(5)} {'dup'.padStart(4)} {'1st'.padStart(4)} {'rep'.padStart(4)} {'lines~'.padStart(6)} {'≥5'.padStart(6)}
         </Text>
       ) : null}
       {(r?.bots ?? []).map(b => (
@@ -488,7 +488,8 @@ export function renderStats(t: Table, d: StatsData, a: Actions) {
           <Text dimColor>{String(b.resolved).padStart(4)}</Text> <Text color="warning">{String(b.open).padStart(4)}</Text>{' '}
           <Text color={b.usedRate !== null && b.usedRate >= 0.6 ? 'success' : b.usedRate !== null && b.usedRate < 0.3 ? 'error' : undefined}>{pct(b.usedRate).padStart(5)}</Text>{' '}
           {fmtSeconds(b.medianResponseSeconds).padStart(6)} {String(b.unique).padStart(5)} <Text color={b.duplicated > b.unique ? 'warning' : undefined}>{String(b.duplicated).padStart(4)}</Text>{' '}
-          {String(b.firsts).padStart(4)} <Text color={b.repeats > b.firsts ? 'warning' : undefined}>{String(b.repeats).padStart(4)}</Text>
+          {String(b.firsts).padStart(4)} <Text color={b.repeats > b.firsts ? 'warning' : undefined}>{String(b.repeats).padStart(4)}</Text>{' '}
+          {(b.medianNearLines === null ? '–' : String(b.medianNearLines)).padStart(6)} {(b.nearKnown ? `${b.substantive}/${b.nearKnown}` : '–').padStart(6)}
         </Text>
       ))}
       {(r?.bots ?? []).filter(b => b.comments > 0).map(b => (
@@ -511,10 +512,48 @@ export function renderStats(t: Table, d: StatsData, a: Actions) {
           {p.unjudged ? <Text dimColor> · {p.unjudged} unjudged</Text> : null}
         </Text>
       ))}
+      {r && r.trend.length > 0 ? renderTrend(t, r, W) : null}
       <Text dimColor wrap={narrow ? 'wrap' : 'truncate-end'}>
-        {'\n'}used = code moved after it (diff outdated, commit hunk on the line, or reply says fixed) · code✓ = used with code evidence · dismis = reply says no, no change · unk = resolved, no evidence · resp = median push→comment · 1st/rep = duplicates raised first / repeated after another bot
+        {'\n'}used = code moved after it (diff outdated, commit hunk on the line, or reply says fixed) · code✓ = used with code evidence · dismis = reply says no, no change · unk = resolved, no evidence · resp = median push→comment · 1st/rep = duplicates raised first / repeated after another bot · lines~ = median lines moved near a used finding · ≥5 = used findings that moved 5+ lines
       </Text>
-      <Text dimColor wrap="truncate-end">b back · j judge pending pairs · r recompute · /prs stats 30 · /prs stats all all-repos · /prs db</Text>
+      <Text dimColor wrap="truncate-end">b back · j judge pending pairs · r recompute · /prs stats 30 · /prs trend 12 · /prs stats all all-repos · /prs db</Text>
+    </Box>
+  )
+}
+
+// One row per week, a bar per bot scaled to the busiest week, so the eye sees
+// who found how much and whether it is rising or falling.
+function renderTrend(t: Table, r: StatsReport, W: number) {
+  const { Box, Text } = t
+  const bots = [...new Set(r.trend.flatMap(w => Object.keys(w.bots)))].sort()
+  const peak = Math.max(1, ...r.trend.flatMap(w => Object.values(w.bots).map(b => b.findings)))
+  const barWidth = Math.max(4, Math.min(14, Math.floor((W - 16) / Math.max(1, bots.length) / 2)))
+  const colors = ['claude', 'success', 'warning', 'merged', 'permission', 'ide'] as const
+  return (
+    <Box flexDirection="column">
+      <Text weight="bold">
+        {'\n'}trend <Text dimColor weight="regular">by week · findings per bot · {r.trend.length} weeks</Text>
+      </Text>
+      <Text dimColor wrap="truncate-end">
+        {'  '}{bots.map((b, i) => <Text key={`lg-${b}`} color={colors[i % colors.length]}>{i ? ' · ' : ''}█ {b}</Text>)}
+      </Text>
+      {r.trend.map(w => (
+        <Text key={`wk-${w.weekStart}`} wrap="truncate-end">
+          {'  '}<Text dimColor>{w.weekStart.slice(5)}</Text>{' '}
+          {bots.map((b, i) => {
+            const tb = w.bots[b]
+            const n = tb?.findings ?? 0
+            const filled = Math.round((n / peak) * barWidth)
+            return (
+              <Text key={`wk-${w.weekStart}-${b}`}>
+                <Text color={colors[i % colors.length]}>{'█'.repeat(filled)}</Text><Text dimColor>{'░'.repeat(barWidth - filled)}</Text>
+                <Text dimColor>{String(n).padStart(3)}{tb && tb.repeats ? `(${tb.repeats}r)` : '    '} </Text>
+              </Text>
+            )
+          })}
+          <Text dimColor>{w.prs} PR{w.prs === 1 ? '' : 's'}</Text>
+        </Text>
+      ))}
     </Box>
   )
 }

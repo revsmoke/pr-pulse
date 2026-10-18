@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { aggregateStats, candidatePairs, formatStats, outcomeOf, parseHunks, parseJudgement, patchFromRest, recordSql, similarity, touchesLine, type PairRow, type SameRow, type StatRow } from '../hooks/db.ts'
+import { aggregateStats, candidatePairs, formatStats, formatTrend, hasLineCounts, nearLinesChanged, outcomeOf, parseHunks, parseJudgement, patchFromRest, recordSql, similarity, touchesLine, weekStartOf, type PairRow, type SameRow, type StatRow } from '../hooks/db.ts'
 import { coAuthorsOf, commentHasFindings, diffSnapshots, parseDetail, parseList, severityOf, statusLineOf, titleOf } from '../hooks/github.ts'
 import { DETAIL_JSON, LIST_JSON } from './fixtures.ts'
 
@@ -66,14 +66,16 @@ const PATCH_REST = [
   { filename: 'assets/logo.png', patch: null },
 ]
 
+const NEAR: (number | null)[] = [12, null, 0, 2, null, null, null]
+const OPENED = ['2026-03-02T09:08:00Z', '2026-03-02T12:18:00Z', '2026-03-02T09:12:00Z', '2026-03-10T09:12:00Z', '2026-03-10T09:10:00Z', '2026-03-02T09:04:00Z', '2026-03-02T09:11:00Z']
 const STAT_ROWS: StatRow[] = [
-  { id: 't1', number: 42, bot: 'Codex', kind: 'thread', has_findings: 1, severity: 'P1', response_seconds: 300, outcome: 'used', is_outdated: 1, addressed_touched_line: 1, dup: 1 },
-  { id: 't2', number: 42, bot: 'Codex', kind: 'thread', has_findings: 1, severity: 'P2', response_seconds: 420, outcome: 'open', is_outdated: 0, addressed_touched_line: null, dup: 0 },
-  { id: 't3', number: 42, bot: 'CodeRabbit', kind: 'thread', has_findings: 1, severity: 'Minor', response_seconds: 700, outcome: 'dismissed', is_outdated: 0, addressed_touched_line: 0, dup: 1 },
-  { id: 't4', number: 43, bot: 'CodeRabbit', kind: 'thread', has_findings: 1, severity: 'Minor', response_seconds: 500, outcome: 'used', is_outdated: 0, addressed_touched_line: 0, dup: 0 },
-  { id: 't5', number: 43, bot: 'Cursor Bugbot', kind: 'thread', has_findings: 1, severity: 'High', response_seconds: null, outcome: 'resolved', is_outdated: 0, addressed_touched_line: null, dup: 0 },
-  { id: 'c1', number: 42, bot: 'Claude Code', kind: 'comment', has_findings: 0, severity: null, response_seconds: 60, outcome: 'comment', is_outdated: 0, addressed_touched_line: null, dup: 0 },
-  { id: 'c2', number: 42, bot: 'Claude Code', kind: 'comment', has_findings: 1, severity: null, response_seconds: 90, outcome: 'comment', is_outdated: 0, addressed_touched_line: null, dup: 1 },
+  { id: 't1', number: 42, bot: 'Codex', kind: 'thread', has_findings: 1, severity: 'P1', response_seconds: 300, outcome: 'used', is_outdated: 1, addressed_touched_line: 1, near_lines_changed: NEAR.shift() ?? null, opened_at: OPENED.shift() ?? '2026-03-01T09:00:00Z', dup: 1 },
+  { id: 't2', number: 42, bot: 'Codex', kind: 'thread', has_findings: 1, severity: 'P2', response_seconds: 420, outcome: 'open', is_outdated: 0, addressed_touched_line: null, near_lines_changed: NEAR.shift() ?? null, opened_at: OPENED.shift() ?? '2026-03-01T09:00:00Z', dup: 0 },
+  { id: 't3', number: 42, bot: 'CodeRabbit', kind: 'thread', has_findings: 1, severity: 'Minor', response_seconds: 700, outcome: 'dismissed', is_outdated: 0, addressed_touched_line: 0, near_lines_changed: NEAR.shift() ?? null, opened_at: OPENED.shift() ?? '2026-03-01T09:00:00Z', dup: 1 },
+  { id: 't4', number: 43, bot: 'CodeRabbit', kind: 'thread', has_findings: 1, severity: 'Minor', response_seconds: 500, outcome: 'used', is_outdated: 0, addressed_touched_line: 0, near_lines_changed: NEAR.shift() ?? null, opened_at: OPENED.shift() ?? '2026-03-01T09:00:00Z', dup: 0 },
+  { id: 't5', number: 43, bot: 'Cursor Bugbot', kind: 'thread', has_findings: 1, severity: 'High', response_seconds: null, outcome: 'resolved', is_outdated: 0, addressed_touched_line: null, near_lines_changed: NEAR.shift() ?? null, opened_at: OPENED.shift() ?? '2026-03-01T09:00:00Z', dup: 0 },
+  { id: 'c1', number: 42, bot: 'Claude Code', kind: 'comment', has_findings: 0, severity: null, response_seconds: 60, outcome: 'comment', is_outdated: 0, addressed_touched_line: null, near_lines_changed: NEAR.shift() ?? null, opened_at: OPENED.shift() ?? '2026-03-01T09:00:00Z', dup: 0 },
+  { id: 'c2', number: 42, bot: 'Claude Code', kind: 'comment', has_findings: 1, severity: null, response_seconds: 90, outcome: 'comment', is_outdated: 0, addressed_touched_line: null, near_lines_changed: NEAR.shift() ?? null, opened_at: OPENED.shift() ?? '2026-03-01T09:00:00Z', dup: 1 },
 ]
 const PAIR_ROWS: PairRow[] = [
   { bot_a: 'Codex', bot_b: 'CodeRabbit', same: 1, basis: 'colocated', n: 1 },
@@ -171,8 +173,20 @@ test('ledger rules: outcomes, candidate pairs, SQL and judgement parsing', () =>
   // Hunks: `@@ -a,b +c,d @@` headers, a missing patch, and the line check with slack.
   const patch = patchFromRest(JSON.stringify(PATCH_REST))!
   expect(patch.files).toEqual(['forge/export.ts', 'forge/routes.ts', 'assets/logo.png'])
-  expect(patch.hunks['forge/export.ts']).toEqual([[80, 12, 80, 20], [130, 3, 138, 9]])
-  expect(parseHunks('@@ -1 +1,2 @@')).toEqual([[1, 1, 1, 2]])
+  expect(patch.hunks['forge/export.ts']).toEqual([[80, 12, 80, 20, 1, 1], [130, 3, 138, 9, 1, 1]])
+  expect(parseHunks('@@ -1 +1,2 @@\n-a\n+b\n+c\n--- not a removal\n+++ not an add')).toEqual([[1, 1, 1, 2, 2, 1]])
+  expect(hasLineCounts(patch)).toBe(true)
+  expect(hasLineCounts({ files: ['x'], hunks: { x: [[1, 1, 1, 1]] } })).toBe(false)
+  // Lines moved near the finding: both export.ts hunks reach line 88? Only the first (80..92+3).
+  expect(nearLinesChanged(patch, { path: 'forge/export.ts', line: 88, originalLine: 88 })).toBe(2)
+  expect(nearLinesChanged(patch, { path: 'forge/export.ts', line: 120, originalLine: 120 })).toBe(0)
+  expect(nearLinesChanged(patch, { path: 'forge/audit.ts', line: 9, originalLine: 9 })).toBe(0)
+  expect(nearLinesChanged(patch, { path: 'assets/logo.png', line: 1, originalLine: 1 })).toBeNull()
+  expect(nearLinesChanged({ files: ['x'], hunks: { x: [[1, 5, 1, 5]] } }, { path: 'x', line: 3, originalLine: 3 })).toBeNull()
+  expect(nearLinesChanged(null, { path: 'x', line: 1, originalLine: 1 })).toBeNull()
+  expect(weekStartOf('2026-03-04T10:00:00Z')).toBe('2026-03-02')
+  expect(weekStartOf('2026-03-02T00:00:00Z')).toBe('2026-03-02')
+  expect(weekStartOf('2026-03-08T23:59:00Z')).toBe('2026-03-02')
   expect(touchesLine(patch, { path: 'forge/export.ts', line: 88, originalLine: 88 })).toBe(true)
   expect(touchesLine(patch, { path: 'forge/export.ts', line: 120, originalLine: 120 })).toBe(false)
   expect(touchesLine(patch, { path: 'forge/export.ts', line: 133, originalLine: 133 })).toBe(true)
@@ -206,7 +220,9 @@ test('ledger rules: outcomes, candidate pairs, SQL and judgement parsing', () =>
   expect(statements).toContain("'used'")
   expect(statements).toContain("'open'")
   expect(statements).toMatch(/INSERT INTO commits .*'b2c3d4e'.*\["forge\/export\.ts","forge\/routes\.ts","assets\/logo\.png"\]/)
-  expect(statements).toContain("'comment', 1, NULL, NULL)")
+  expect(statements).toContain("'comment', 1, NULL, NULL, NULL)")
+  // Codex 88 was addressed by b2c3d4e whose first hunk reaches it: 2 lines moved.
+  expect(statements).toMatch(/'PRRT_1',[^\n]*'used',[^\n]*, 88, 1, 2\) ON CONFLICT/)
   // With the default 8-line window these fixtures yield one wording-similar pair.
   expect(statements).toContain("'similar')")
   expect(statements).not.toContain("'colocated')")
@@ -255,9 +271,26 @@ test('stats aggregation: per-bot rates, medians, uniqueness and overlap', () => 
   expect(report.pairs.find(p => p.botA === 'CodeRabbit' && p.botB === 'Codex')?.colocated).toBe(1)
   expect(report.unjudgedPairs).toBe(2)
   expect(report.totalThreads).toBe(6)
+  // Lines moved near used findings: Codex 12 (one known), CodeRabbit 2 of 2 known, none substantive for CodeRabbit.
+  expect(codex.medianNearLines).toBe(12)
+  expect(codex.substantive).toBe(1)
+  expect(rabbit.medianNearLines).toBe(2)
+  expect(rabbit.nearKnown).toBe(1)
+  expect(rabbit.substantive).toBe(0)
+  expect(cursor.medianNearLines).toBeNull()
+  // Trend: two weeks, oldest first; the no-findings Claude comment is not counted.
+  expect(report.trend.map(w => w.weekStart)).toEqual(['2026-03-02', '2026-03-09'])
+  expect(report.trend[0]?.bots['Codex']).toEqual({ findings: 2, used: 1, repeats: 1, medianNearLines: 12 })
+  expect(report.trend[0]?.bots['Claude Code']?.findings).toBe(1)
+  expect(report.trend[1]?.bots['Cursor Bugbot']).toEqual({ findings: 1, used: 0, repeats: 0, medianNearLines: null })
+  expect(report.trend[1]?.prs).toBe(1)
+  expect(aggregateStats(STAT_ROWS, PAIR_ROWS, SAME_ROWS, null, null, 1, 1).trend.length).toBe(1)
+  const trendText = formatTrend(report)
+  expect(trendText).toContain('2026-03-02')
+  expect(trendText).toMatch(/2 found 1 used 1 rep 12L/)
   const text = formatStats(report)
   expect(text).toContain('6 findings across 2 PRs')
-  expect(text).toMatch(/Codex\s+2\s+2\s+0\/0\s+1\s+1\s+1\s+0\s+0\s+1\s+100%/)
+  expect(text).toMatch(/Codex\s+2\s+2\s+0\/0\s+1\s+1\s+1\s+0\s+0\s+1\s+100%\s+6m\s+1\s+1\s+1\s+0\s+12\s+1\/1/)
   expect(text).toContain('/prs judge')
 })
 
@@ -295,8 +328,14 @@ test('drilling into a PR writes it to the ledger, and backfill sweeps settled PR
   expect(stats.text).toContain('Codex')
   expect(sql.some(s => /opened_at >= '/.test(s))).toBe(true)
 
+  const trend = await $.command.run({ command: 'prs', args: 'trend 4' })
+  expect(trend.text).toContain('Weekly trend on acme-labs/widget-forge')
+  expect(trend.text).toContain('2026-03-02')
+
   const ui = await $.ui.mount({ plugin: 'pr-pulse', surface: 'terminal', component: 'Pane', requestId: 'pr-pulse', props: PANE_PROPS })
   expect(await ui.find({ text: /review bots/ })).toBeDefined()
+  expect(await ui.find({ text: /trend by week/ })).toBeDefined()
+  expect(await ui.find({ text: /03-09/ })).toBeDefined()
   expect(await ui.find({ text: /Codex/ })).toBeDefined()
   expect(await ui.find({ text: /CodeRabbit × Cursor Bugbot/ })).toBeDefined()
   expect(await ui.find({ text: /Claude Code × Cursor Bugbot/ })).toBeDefined()

@@ -1,7 +1,7 @@
 // Pure SQL builders and the analysis rules for the review-bot ledger kept in
 // SQLite (driven through the sqlite3 CLI from register.tsx). No `$` here.
 
-import type { BotStats, CommitPatch, Hunk, Outcome, PairStats, PrDetail, StatsReport, Thread } from '../types'
+import type { BotStats, CommitPatch, Hunk, Outcome, PairStats, PrDetail, StatsReport, Thread, TrendBot, TrendWeek } from '../types'
 import { displayName } from './github.ts'
 
 export const SCHEMA = `
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS threads (
   trigger_sha TEXT, trigger_at TEXT, response_seconds INTEGER, is_resolved INTEGER, resolved_by TEXT,
   is_outdated INTEGER, replies INTEGER, last_reply_by TEXT, last_reply_at TEXT, last_reply_body TEXT,
   addressed_by TEXT, addressed_touched_file INTEGER, outcome TEXT, url TEXT, updated_at TEXT,
-  kind TEXT DEFAULT 'thread', has_findings INTEGER DEFAULT 1, original_line INTEGER, addressed_touched_line INTEGER);
+  kind TEXT DEFAULT 'thread', has_findings INTEGER DEFAULT 1, original_line INTEGER, addressed_touched_line INTEGER, near_lines_changed INTEGER);
 CREATE INDEX IF NOT EXISTS threads_repo_bot ON threads (repo, bot, opened_at);
 CREATE TABLE IF NOT EXISTS thread_pairs (
   a TEXT NOT NULL, b TEXT NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL, bot_a TEXT, bot_b TEXT,
@@ -35,6 +35,7 @@ export const MIGRATIONS = [
   'ALTER TABLE threads ADD COLUMN addressed_touched_line INTEGER;',
   'ALTER TABLE commits ADD COLUMN hunks TEXT;',
   "ALTER TABLE thread_pairs ADD COLUMN basis TEXT DEFAULT 'colocated';",
+  'ALTER TABLE threads ADD COLUMN near_lines_changed INTEGER;',
 ]
 
 export function q(value: string | number | boolean | null | undefined): string {
@@ -49,16 +50,30 @@ const NEGATIVE = /\b(won'?t fix|wontfix|not applicable|false positive|intentiona
 
 // ---------- patches ----------
 
-// Reads `@@ -a,b +c,d @@` headers out of a unified diff.
+// Reads `@@ -a,b +c,d @@` headers out of a unified diff, and counts the
+// added and removed lines inside each hunk.
 export function parseHunks(patch: string | null | undefined): Hunk[] {
   if (!patch) return []
   const out: Hunk[] = []
-  const re = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm
-  let m: RegExpExecArray | null
-  while ((m = re.exec(patch)) !== null) {
-    out.push([Number(m[1]), m[2] === undefined ? 1 : Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])])
+  const header = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/
+  for (const line of patch.split('\n')) {
+    const m = header.exec(line)
+    if (m) {
+      out.push([Number(m[1]), m[2] === undefined ? 1 : Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4]), 0, 0])
+      continue
+    }
+    const current = out[out.length - 1]
+    if (!current) continue
+    if (line.startsWith('+') && !line.startsWith('+++')) current[4] = (current[4] ?? 0) + 1
+    else if (line.startsWith('-') && !line.startsWith('---')) current[5] = (current[5] ?? 0) + 1
   }
   return out
+}
+
+// Whether every hunk of a stored patch carries add/remove counts (rows written
+// before they were kept do not, and are fetched again once).
+export function hasLineCounts(patch: CommitPatch): boolean {
+  return Object.values(patch.hunks).every(hunks => hunks.every(h => h.length >= 6))
 }
 
 export function patchFromRest(json: string): CommitPatch | null {
@@ -93,6 +108,31 @@ export function touchesLine(patch: CommitPatch | null | undefined, thread: Pick<
   return hunks.some(([oldStart, oldLines, newStart, newLines]) =>
     lines.some(n => (n >= oldStart - slack && n <= oldStart + Math.max(oldLines, 1) + slack) || (n >= newStart - slack && n <= newStart + Math.max(newLines, 1) + slack)),
   )
+}
+
+function hunkReaches(h: Hunk, lines: number[], slack: number): boolean {
+  const [oldStart, oldLines, newStart, newLines] = h
+  return lines.some(n => (n >= oldStart - slack && n <= oldStart + Math.max(oldLines, 1) + slack) || (n >= newStart - slack && n <= newStart + Math.max(newLines, 1) + slack))
+}
+
+// How many lines the addressing commit added plus removed within reach of the
+// finding: a measure of how much code moved because of it. Null when the
+// patch, the file's hunks or their counts are unknown; 0 when the file was
+// touched elsewhere only.
+export function nearLinesChanged(patch: CommitPatch | null | undefined, thread: Pick<Thread, 'path' | 'line' | 'originalLine'>, slack = 3): number | null {
+  if (!patch) return null
+  const hunks = patch.hunks[thread.path]
+  if (!hunks) return 0
+  if (hunks.length === 0) return null
+  const lines = [thread.originalLine, thread.line].filter((n): n is number => n !== null)
+  if (lines.length === 0) return null
+  let total = 0
+  for (const h of hunks) {
+    if (!hunkReaches(h, lines, slack)) continue
+    if (h[4] === undefined || h[5] === undefined) return null
+    total += h[4] + h[5]
+  }
+  return total
 }
 
 // ---------- outcomes ----------
@@ -136,11 +176,12 @@ export function recordSql(repo: string, pr: PrDetail, patches: ReadonlyMap<strin
     const patch = t.addressedBy ? patches.get(t.addressedBy) : undefined
     const touchedFile = patch === undefined || patch === null ? null : patch.files.includes(t.path)
     const touchedLine = touchesLine(patch, t)
+    const near = nearLinesChanged(patch, t)
     const outcome = outcomeOf(t, touchedFile, touchedLine)
     lines.push(
-      `INSERT INTO threads (id, repo, number, bot, opened_by, opened_by_is_bot, opened_at, path, line, severity, title, body, trigger_sha, trigger_at, response_seconds, is_resolved, resolved_by, is_outdated, replies, last_reply_by, last_reply_at, last_reply_body, addressed_by, addressed_touched_file, outcome, url, updated_at, kind, has_findings, original_line, addressed_touched_line) VALUES (` +
-        [t.id, repo, pr.number, botOf(t), t.openedBy, t.openedByIsBot, t.openedAt, t.path, t.line, t.severity, t.title, t.body, t.triggerSha, t.triggerAt, t.responseSeconds, t.isResolved, t.resolvedBy, t.isOutdated, t.replies, t.lastReplyBy, t.lastReplyAt, t.lastReplyBody, t.addressedBy, touchedFile, outcome, t.url, nowIso, t.kind, t.hasFindings, t.originalLine, touchedLine].map(q).join(', ') +
-        `) ON CONFLICT (id) DO UPDATE SET is_resolved = excluded.is_resolved, resolved_by = excluded.resolved_by, is_outdated = excluded.is_outdated, replies = excluded.replies, last_reply_by = excluded.last_reply_by, last_reply_at = excluded.last_reply_at, last_reply_body = excluded.last_reply_body, addressed_by = excluded.addressed_by, addressed_touched_file = COALESCE(excluded.addressed_touched_file, threads.addressed_touched_file), addressed_touched_line = COALESCE(excluded.addressed_touched_line, threads.addressed_touched_line), outcome = excluded.outcome, updated_at = excluded.updated_at, kind = excluded.kind, has_findings = excluded.has_findings, original_line = excluded.original_line;`,
+      `INSERT INTO threads (id, repo, number, bot, opened_by, opened_by_is_bot, opened_at, path, line, severity, title, body, trigger_sha, trigger_at, response_seconds, is_resolved, resolved_by, is_outdated, replies, last_reply_by, last_reply_at, last_reply_body, addressed_by, addressed_touched_file, outcome, url, updated_at, kind, has_findings, original_line, addressed_touched_line, near_lines_changed) VALUES (` +
+        [t.id, repo, pr.number, botOf(t), t.openedBy, t.openedByIsBot, t.openedAt, t.path, t.line, t.severity, t.title, t.body, t.triggerSha, t.triggerAt, t.responseSeconds, t.isResolved, t.resolvedBy, t.isOutdated, t.replies, t.lastReplyBy, t.lastReplyAt, t.lastReplyBody, t.addressedBy, touchedFile, outcome, t.url, nowIso, t.kind, t.hasFindings, t.originalLine, touchedLine, near].map(q).join(', ') +
+        `) ON CONFLICT (id) DO UPDATE SET is_resolved = excluded.is_resolved, resolved_by = excluded.resolved_by, is_outdated = excluded.is_outdated, replies = excluded.replies, last_reply_by = excluded.last_reply_by, last_reply_at = excluded.last_reply_at, last_reply_body = excluded.last_reply_body, addressed_by = excluded.addressed_by, addressed_touched_file = COALESCE(excluded.addressed_touched_file, threads.addressed_touched_file), addressed_touched_line = COALESCE(excluded.addressed_touched_line, threads.addressed_touched_line), near_lines_changed = COALESCE(excluded.near_lines_changed, threads.near_lines_changed), outcome = excluded.outcome, updated_at = excluded.updated_at, kind = excluded.kind, has_findings = excluded.has_findings, original_line = excluded.original_line;`,
     )
   }
   for (const { a, b, basis } of candidatePairs(pr.threads)) {
@@ -257,6 +298,8 @@ export type StatRow = {
   outcome: Outcome
   is_outdated: number
   addressed_touched_line: number | null
+  near_lines_changed: number | null
+  opened_at: string
   dup: number
 }
 
@@ -270,7 +313,7 @@ export function statsSql(repo: string | null, sinceDays: number | null, nowIso: 
   const where: string[] = ['opened_by_is_bot = 1', 'bot IS NOT NULL']
   if (repo) where.push(`repo = ${q(repo)}`)
   if (since) where.push(`opened_at >= ${q(since)}`)
-  const threads = `SELECT t.id, t.number, t.bot, COALESCE(t.kind, 'thread') AS kind, COALESCE(t.has_findings, 1) AS has_findings, t.severity, t.response_seconds, t.outcome, t.is_outdated, t.addressed_touched_line,
+  const threads = `SELECT t.id, t.number, t.bot, COALESCE(t.kind, 'thread') AS kind, COALESCE(t.has_findings, 1) AS has_findings, t.severity, t.response_seconds, t.outcome, t.is_outdated, t.addressed_touched_line, t.near_lines_changed, t.opened_at,
   (SELECT COUNT(*) FROM thread_pairs p WHERE p.same = 1 AND (p.a = t.id OR p.b = t.id)) AS dup
 FROM threads t WHERE ${where.join(' AND ')};`
   const pwhere: string[] = []
@@ -289,7 +332,22 @@ function median(values: number[]): number | null {
   return sorted.length % 2 ? sorted[mid]! : Math.round((sorted[mid - 1]! + sorted[mid]!) / 2)
 }
 
-export function aggregateStats(rows: StatRow[], pairRows: PairRow[], sameRows: SameRow[], repo: string | null, sinceDays: number | null, now: number): StatsReport {
+// The Monday that starts the week an ISO timestamp falls in, as YYYY-MM-DD.
+export function weekStartOf(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '?'
+  const day = (d.getUTCDay() + 6) % 7
+  d.setUTCDate(d.getUTCDate() - day)
+  return d.toISOString().slice(0, 10)
+}
+
+export const SUBSTANTIVE_LINES = 5
+
+function medianNear(list: StatRow[]): number | null {
+  return median(list.filter(r => r.outcome === 'used' && r.near_lines_changed !== null).map(r => r.near_lines_changed as number))
+}
+
+export function aggregateStats(rows: StatRow[], pairRows: PairRow[], sameRows: SameRow[], repo: string | null, sinceDays: number | null, now: number, trendWeeks = 12): StatsReport {
   const byBot = new Map<string, StatRow[]>()
   for (const r of rows) {
     const list = byBot.get(r.bot) ?? []
@@ -319,7 +377,11 @@ export function aggregateStats(rows: StatRow[], pairRows: PairRow[], sameRows: S
       }
       const findings = threads.length + comments.filter(c => c.has_findings).length
       const duplicated = list.filter(r => r.dup > 0 && (r.kind !== 'comment' || r.has_findings)).length
+      const nearKnownRows = threads.filter(r => r.outcome === 'used' && r.near_lines_changed !== null)
       return {
+        medianNearLines: medianNear(threads),
+        nearKnown: nearKnownRows.length,
+        substantive: nearKnownRows.filter(r => (r.near_lines_changed ?? 0) >= SUBSTANTIVE_LINES).length,
         bot,
         findings,
         threads: threads.length,
@@ -361,7 +423,37 @@ export function aggregateStats(rows: StatRow[], pairRows: PairRow[], sameRows: S
     pairMap.set(key, entry)
   }
   const pairs = [...pairMap.values()].sort((a, b) => b.same - a.same)
+
+  // Weekly trend over the counted findings: who found how much, how much of
+  // it was used, how often it repeated another bot, how much code it moved.
+  const repeatIds = new Set<string>()
+  void repeatIds
+  const byWeek = new Map<string, StatRow[]>()
+  for (const r of rows) {
+    if (r.kind === 'comment' && !r.has_findings) continue
+    const week = weekStartOf(r.opened_at)
+    const list = byWeek.get(week) ?? []
+    list.push(r)
+    byWeek.set(week, list)
+  }
+  const trend: TrendWeek[] = [...byWeek.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .slice(-trendWeeks)
+    .map(([weekStart, list]) => {
+      const perBot: Record<string, TrendBot> = {}
+      for (const r of list) {
+        const entry = perBot[r.bot] ?? { findings: 0, used: 0, repeats: 0, medianNearLines: null }
+        entry.findings += 1
+        if (r.outcome === 'used') entry.used += 1
+        if (r.dup > 0) entry.repeats += 1
+        perBot[r.bot] = entry
+      }
+      for (const bot of Object.keys(perBot)) perBot[bot]!.medianNearLines = medianNear(list.filter(r => r.bot === bot))
+      return { weekStart, prs: new Set(list.map(r => r.number)).size, bots: perBot }
+    })
+
   return {
+    trend,
     repo,
     sinceDays,
     generatedAt: now,
@@ -388,7 +480,7 @@ export function formatStats(r: StatsReport): string {
   const scope = `${r.repo ?? 'all repos'}${r.sinceDays ? `, last ${r.sinceDays} days` : ''}`
   if (r.bots.length === 0) return `No bot review findings recorded yet for ${scope}. Open a PR in the pane or run /prs backfill 30.`
   const lines = [`Review bots on ${scope}: ${r.totalThreads} findings across ${r.totalPrs} PRs`, '']
-  lines.push('bot                findings  threads  PR-comments  PRs  used  code-verified  dismissed  unknown  open  used%  median response  unique  duplicated  first  repeat')
+  lines.push('bot                findings  threads  PR-comments  PRs  used  code-verified  dismissed  unknown  open  used%  median response  unique  duplicated  first  repeat  lines~  ≥5 lines')
   for (const b of r.bots) {
     lines.push(
       [
@@ -408,6 +500,8 @@ export function formatStats(r: StatsReport): string {
         String(b.duplicated).padStart(11),
         String(b.firsts).padStart(6),
         String(b.repeats).padStart(7),
+        (b.medianNearLines === null ? '–' : String(b.medianNearLines)).padStart(7),
+        (b.nearKnown ? `${b.substantive}/${b.nearKnown}` : '–').padStart(9),
       ].join(' '),
     )
   }
@@ -416,12 +510,35 @@ export function formatStats(r: StatsReport): string {
   lines.push('used = resolved and the code moved: GitHub marked the diff outdated, the addressing commit touched the flagged line, or the reply says fixed.')
   lines.push('code-verified = used with code evidence (outdated diff or hunk on the line), not just a reply. dismissed = reply says no, nothing moved. unknown = resolved without evidence.')
   lines.push('first/repeat = of findings the model judged the same as another bot\'s, how many this bot raised first vs repeated after another bot. median response = push to inline comment.')
+  lines.push(`lines~ = median lines added+removed by the addressing commit within 3 lines of a used finding; ≥5 lines = how many of those used findings moved at least ${SUBSTANTIVE_LINES} lines (a proxy for substance over nits).`)
   if (r.pairs.length) {
     lines.push('', 'overlap between bots (same finding, judged by the model; co-located = same file within 8 lines, similar = wording match anywhere in the PR):')
     for (const p of r.pairs) {
       lines.push(`  ${p.botA} × ${p.botB}: ${p.same} same of ${p.judged} judged (${p.colocated} co-located, ${p.similar} similar)${p.unjudged ? `, ${p.unjudged} not judged yet` : ''}`)
     }
     if (r.unjudgedPairs) lines.push(`  run /prs judge to settle the ${r.unjudgedPairs} unjudged pair(s)`)
+  }
+  return lines.join('\n')
+}
+
+export function formatTrend(r: StatsReport): string {
+  if (r.trend.length === 0) return 'No findings on record yet for a trend.'
+  const bots = [...new Set(r.trend.flatMap(w => Object.keys(w.bots)))].sort()
+  const scope = `${r.repo ?? 'all repos'}${r.sinceDays ? `, last ${r.sinceDays} days` : ''}`
+  const lines = [`Weekly trend on ${scope} (week starting Monday; findings, used, repeats of another bot, median lines moved):`, '']
+  lines.push(['week      ', 'PRs'.padStart(4), ...bots.map(b => b.padStart(24))].join('  '))
+  for (const w of r.trend) {
+    lines.push(
+      [
+        w.weekStart,
+        String(w.prs).padStart(4),
+        ...bots.map(b => {
+          const t = w.bots[b]
+          if (!t) return '–'.padStart(24)
+          return `${t.findings} found ${t.used} used ${t.repeats} rep ${t.medianNearLines === null ? '–' : t.medianNearLines}L`.padStart(24)
+        }),
+      ].join('  '),
+    )
   }
   return lines.join('\n')
 }

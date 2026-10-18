@@ -15,6 +15,8 @@ import {
   aggregateStats,
   commitFilesSql,
   formatStats,
+  formatTrend,
+  hasLineCounts,
   judgePrompt,
   pairUpdateSql,
   parseJudgement,
@@ -147,12 +149,14 @@ async function recordDetail($: EngineInterface, repo: string, detail: PrDetail):
   const known = await sql($, commitFilesSql(repo, detail.number))
   if (!known.ok) return known.err
   for (const row of known.rows as { sha: string; files: string; hunks: string | null }[]) {
-    // A row written before hunks were kept is refetched once, for the line check.
+    // A row written before hunks (or their line counts) were kept is fetched
+    // again once; a complete one is reused.
     if (!patchBySha.has(row.sha) && row.hunks) {
       try {
-        patchBySha.set(row.sha, { files: JSON.parse(row.files) as string[], hunks: JSON.parse(row.hunks) as CommitPatch['hunks'] })
+        const patch = { files: JSON.parse(row.files) as string[], hunks: JSON.parse(row.hunks) as CommitPatch['hunks'] }
+        if (hasLineCounts(patch)) patchBySha.set(row.sha, patch)
       } catch {
-        patchBySha.set(row.sha, null)
+        // unreadable row: fetch again below
       }
     }
   }
@@ -207,7 +211,7 @@ async function fetchDetail($: EngineInterface, repo: string, number: number): Pr
   }
 }
 
-async function computeStats($: EngineInterface, repo: string | null, sinceDays: number | null): Promise<{ report: StatsReport | null; error: string | null }> {
+async function computeStats($: EngineInterface, repo: string | null, sinceDays: number | null, trendWeeks = 12): Promise<{ report: StatsReport | null; error: string | null }> {
   const now = await $.clock.now()
   const queries = statsSql(repo, sinceDays, new Date(now).toISOString())
   const threads = await sql($, queries.threads)
@@ -216,7 +220,7 @@ async function computeStats($: EngineInterface, repo: string | null, sinceDays: 
   if (!pairs.ok) return { report: null, error: pairs.err }
   const sames = await sql($, queries.sames)
   if (!sames.ok) return { report: null, error: sames.err }
-  const report = aggregateStats(threads.rows as StatRow[], pairs.rows as PairRow[], sames.rows as SameRow[], repo, sinceDays, now)
+  const report = aggregateStats(threads.rows as StatRow[], pairs.rows as PairRow[], sames.rows as SameRow[], repo, sinceDays, now, trendWeeks)
   await update($, statsAtom, () => report)
   return { report, error: null }
 }
@@ -492,7 +496,7 @@ function readSettings(options: Readonly<Record<string, unknown>>): Settings {
   }
 }
 
-const USAGE = 'Usage: /prs · /prs N · /prs back · /prs refresh · /prs close · /prs repo owner/name · /prs stats [days|all] [all-repos] · /prs backfill [N] · /prs judge [N] · /prs db'
+const USAGE = 'Usage: /prs · /prs N · /prs back · /prs refresh · /prs close · /prs repo owner/name · /prs stats [days|all] [all-repos] · /prs trend [weeks] · /prs backfill [N] · /prs judge [N] · /prs db'
 
 // ---------- hooks ----------
 
@@ -504,7 +508,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'prs',
       description: 'Pull request pane and review-bot ledger: /prs, /prs N, /prs stats, /prs backfill, /prs judge, /prs repo owner/name',
-      argumentHint: '[N | back | refresh | close | stats [days] | backfill [N] | judge [N] | db | repo owner/name]',
+      argumentHint: '[N | back | refresh | close | stats [days] | trend [weeks] | backfill [N] | judge [N] | db | repo owner/name]',
     })
     hasOfferedPane = !e.isInteractive
     const repo = await ensureRepo($)
@@ -547,6 +551,14 @@ export const register: Register = (on, options) => {
       const days = stats[1] && stats[1] !== 'all' ? Number(stats[1]) : null
       const scope = stats[2] ? null : repo
       return { text: await showStats($, scope, days) }
+    }
+    const trend = /^trend(?:\s+(\d+))?(?:\s+(all-repos))?$/i.exec(args)
+    if (trend) {
+      const weeks = trend[1] ? Math.max(1, Math.min(52, Number(trend[1]))) : 12
+      const got = await computeStats($, trend[2] ? null : repo, null, weeks)
+      await update($, modeAtom, () => 'stats')
+      await $.ui.open({ id: PANE, title: 'PRs', focus: true })
+      return { text: got.report ? formatTrend(got.report) : got.error ?? 'trend failed' }
     }
     const back = /^backfill(?:\s+(\d+))?$/i.exec(args)
     if (back) {

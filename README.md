@@ -38,6 +38,7 @@ overlap between each pair of bots as judged by a cheap model call.
 | `/prs close` | close the pane |
 | `/prs repo owner/name` | watch another repository |
 | `/prs stats [days\|all] [all-repos]` | per-bot usefulness and overlap report, also drawn in the pane |
+| `/prs trend [weeks] [all-repos]` | week-by-week findings, used, repeats and lines moved per bot (default 12 weeks); the stats view draws it as bars |
 | `/prs backfill [N]` | sweep the last N merged or closed PRs (default 30) into the ledger, in the background |
 | `/prs judge [N]` | settle up to N unjudged "same finding?" pairs with the model |
 | `/prs db` | print the ledger's path |
@@ -69,6 +70,12 @@ the stats view, `j` judges pending pairs.
 - **first / repeat**: among duplicated findings, how many this bot raised
   before the other bot, and how many it repeated after another bot had already
   said it. A bot that is mostly "repeat" adds little on top of the others.
+- **lines~ / ≥5 lines**: for used findings whose addressing commit's patch is
+  known, the median lines added plus removed within three lines of the finding,
+  and how many moved at least five lines. A proxy for substance: a bot whose
+  findings mostly move one or two lines is mostly flagging nits.
+- **trend**: the same counts bucketed by week (Monday start), so you can see
+  whether a bot's volume, usefulness or repetition is changing over time.
 
 The ledger is written whenever the pane loads a PR's detail, when the poller
 sees an open PR change, when a PR settles, and by `/prs backfill`. Query it

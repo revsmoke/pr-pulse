@@ -102,8 +102,9 @@ export type Thread = {
 }
 
 // A unified-diff hunk of one file in one commit: old-side start and length,
-// new-side start and length.
-export type Hunk = [oldStart: number, oldLines: number, newStart: number, newLines: number]
+// new-side start and length, and (when the patch text was read) the lines
+// added and removed inside it. Rows written before counts were kept have four.
+export type Hunk = [oldStart: number, oldLines: number, newStart: number, newLines: number, adds?: number, dels?: number]
 
 export type CommitPatch = { files: string[]; hunks: Record<string, Hunk[]> }
 
@@ -156,7 +157,17 @@ export type BotStats = {
   firsts: number
   repeats: number
   severities: Record<string, number>
+  // Lines added plus removed by the addressing commit within a few lines of
+  // the finding: how much code moved because of it. Over used findings whose
+  // commit patch is known.
+  medianNearLines: number | null
+  nearKnown: number
+  substantive: number
 }
+
+export type TrendBot = { findings: number; used: number; repeats: number; medianNearLines: number | null }
+
+export type TrendWeek = { weekStart: string; prs: number; bots: Record<string, TrendBot> }
 
 export type PairStats = { botA: string; botB: string; same: number; judged: number; unjudged: number; colocated: number; similar: number }
 
@@ -169,6 +180,7 @@ export type StatsReport = {
   bots: BotStats[]
   pairs: PairStats[]
   unjudgedPairs: number
+  trend: TrendWeek[]
 }
 
 export type BackfillProgress = { running: boolean; done: number; total: number; message: string }

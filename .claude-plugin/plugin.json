@@ -1,6 +1,6 @@
 {
   "name": "pr-pulse",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Live pane of a repo's open pull requests (checks, review bots, enforced rules, review threads and the commits that address them, the agents at work) plus a SQLite ledger of review-bot findings with per-bot usefulness and overlap stats.",
   "author": {
     "name": "Bryan Rice"
