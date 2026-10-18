@@ -159,6 +159,14 @@ test('ledger rules: outcomes, candidate pairs, SQL and judgement parsing', () =>
   expect(detail.threads.find(t => t.id === 'IC_3')?.responseSeconds).toBe(6 * 60)
   expect(commentHasFindings('## Code review\n\nNo issues found.')).toBe(false)
   expect(commentHasFindings('@codex review')).toBe(false)
+  // Status tables, badges and "nothing found" rounds from the real bots are noise.
+  expect(commentHasFindings('## Codex Review Summary\nThis comment shows the latest Codex review activity on this pull request.\n| Review | Status | Commit |\n| --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** | abc |')).toBe(false)
+  expect(commentHasFindings("Codex Review: Didn't find any major issues. Another round soon, please! **Reviewed commit:** `d665`")).toBe(false)
+  expect(commentHasFindings('<a href="https://app.coderabbit.ai/change-stack/x/y/pull/1?cs_source=review_comment"><picture><source srcset="https://storage.googleapis.com/a.png"></picture></a>')).toBe(false)
+  expect(commentHasFindings('<details><summary>✅ Action performed</summary>Review finished. Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits.</details>')).toBe(false)
+  expect(commentHasFindings('> [!IMPORTANT]\n> ## Review skipped\n> Review was skipped due to path filters')).toBe(false)
+  // A real PR-level review with content counts.
+  expect(commentHasFindings("**Claude finished @user's task in 34s** —— [View job](https://github.com/x/y/actions/runs/1) --- ### Review of PR #218 I read `create.cfm` and the `Bluebeam.cfc` changes. One issue: the token refresh error is swallowed and the request fails silently.")).toBe(true)
 
   // Hunks: `@@ -a,b +c,d @@` headers, a missing patch, and the line check with slack.
   const patch = patchFromRest(JSON.stringify(PATCH_REST))!

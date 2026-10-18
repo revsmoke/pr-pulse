@@ -633,14 +633,30 @@ export function parseDetail(json: string, fetchedAt: number, rules: RuleSummary 
   }
 }
 
-// A PR-level bot comment that reports nothing (a walkthrough, "no issues
-// found", a review-state marker) is recorded but not counted as a finding.
+// A PR-level bot comment that reports nothing (a status table, a badge, a
+// walkthrough, "no issues found", "review skipped") is recorded but not
+// counted as a finding. What remains must read like a finding.
+const COMMENT_NOISE = [
+  /no issues? found|didn'?t find any|found no (major |significant )?(issues|problems)|no (problems|concerns|findings)\b|lgtm|looks good to me|nothing to flag|approved with no/i,
+  /codex review summary|this comment shows the latest codex review activity/i,
+  /summary by coderabbit|review_stack|change-stack|action performed|review finished|review skipped|review paused|auto-generated comment|incremental review system|walkthrough/i,
+  /^\s*(## |### )?(pull request overview|review summary|coverage report|dependency review)/im,
+  /^\s*@\w+\s+(review|retry|help|resolve)\s*$/i,
+]
+const FINDING_WORDS = /\b(issues?|bugs?|fix(es|ed)?|should|must|missing|incorrect|wrong|vulnerab\w*|leaks?|race|errors?|fail\w*|unsafe|undefined|inject\w*|severity|P[0-3]|findings?|problems?|concerns?|suggest\w*|risks?|crash\w*|regression|breaks?|broken|security|unauthenticated|unauthori[sz]ed|unhandled|overflow|deprecated|nit|nitpick)\b/i
+
 export function commentHasFindings(body: string): boolean {
-  const text = body.replace(/<!--[\s\S]*?-->/g, ' ')
-  if (/no issues? found|no (problems|concerns|findings)|lgtm|looks good to me|nothing to flag|approved with no/i.test(text)) return false
-  if (/^\s*(## |### )?(walkthrough|summary by coderabbit|review summary|pull request overview)/im.test(text) && !/\b(bug|issue|fix|should|must|missing|incorrect|vulnerab|leak|race|error)\b/i.test(text)) return false
-  if (/^\s*@\w+\s+(review|retry|help)\s*$/i.test(text)) return false
-  return text.replace(/\s+/g, ' ').trim().length > 40
+  const text = body
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/^\s*\|.*\|\s*$/gm, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (text.length < 60) return false
+  if (COMMENT_NOISE.some(re => re.test(text))) return false
+  return FINDING_WORDS.test(text)
 }
 
 export function squash(text: string): string {
