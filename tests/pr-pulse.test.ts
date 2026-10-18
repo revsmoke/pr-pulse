@@ -123,6 +123,8 @@ test('severity and title heuristics cover Codex, CodeRabbit and Cursor comment s
   expect(titleOf('### Project admins cannot raise issues\n\n**Medium Severity**')).toBe('Project admins cannot raise issues')
   expect(titleOf('_🔎 Supported by static analysis_\n\n**Guard the null token before refreshing.**\n\nDetails...')).toBe('Guard the null token before refreshing.')
   expect(titleOf('_🛠️ Refactor suggestion_\n\n**Extract the retry loop.**')).toBe('Extract the retry loop.')
+  expect(titleOf('```bash\n#!/bin/bash\nrg -n foo\n```\n\n**Reject duplicate names within the selection.**')).toBe('Reject duplicate names within the selection.')
+  expect(titleOf('🔎 Potential issue\n\nThe lock is never released on the error path.')).toBe('The lock is never released on the error path.')
   expect(coAuthorsOf('Fix\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/x')).toEqual(['Claude Fable 5.1'])
 })
 
