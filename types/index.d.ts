@@ -75,6 +75,8 @@ export type ThreadComment = {
 
 export type Thread = {
   id: string
+  kind: 'thread' | 'comment'
+  hasFindings: boolean
   path: string
   line: number | null
   isResolved: boolean
@@ -96,7 +98,14 @@ export type Thread = {
   triggerSha: string | null
   triggerAt: string
   responseSeconds: number | null
+  originalLine: number | null
 }
+
+// A unified-diff hunk of one file in one commit: old-side start and length,
+// new-side start and length.
+export type Hunk = [oldStart: number, oldLines: number, newStart: number, newLines: number]
+
+export type CommitPatch = { files: string[]; hunks: Record<string, Hunk[]> }
 
 export type Commit = {
   sha: string
@@ -126,13 +135,17 @@ export type PrDetail = PrSummary & {
   activity: Activity[]
 }
 
-export type Outcome = 'used' | 'dismissed' | 'resolved' | 'open'
+export type Outcome = 'used' | 'dismissed' | 'resolved' | 'open' | 'comment'
 
 export type BotStats = {
   bot: string
   findings: number
+  threads: number
+  comments: number
+  commentsWithFindings: number
   prs: number
   used: number
+  codeVerified: number
   dismissed: number
   resolved: number
   open: number
@@ -140,10 +153,12 @@ export type BotStats = {
   medianResponseSeconds: number | null
   duplicated: number
   unique: number
+  firsts: number
+  repeats: number
   severities: Record<string, number>
 }
 
-export type PairStats = { botA: string; botB: string; same: number; judged: number; unjudged: number }
+export type PairStats = { botA: string; botB: string; same: number; judged: number; unjudged: number; colocated: number; similar: number }
 
 export type StatsReport = {
   repo: string | null

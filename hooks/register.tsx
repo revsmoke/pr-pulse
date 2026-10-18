@@ -8,8 +8,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BackfillProgress, PrDetail, SettledPr, Snapshot, StatsReport } from '../types'
+import type { BackfillProgress, CommitPatch, PrDetail, SettledPr, Snapshot, StatsReport } from '../types'
 import {
+  MIGRATIONS,
   SCHEMA,
   aggregateStats,
   commitFilesSql,
@@ -17,10 +18,12 @@ import {
   judgePrompt,
   pairUpdateSql,
   parseJudgement,
+  patchFromRest,
   recordSql,
   statsSql,
   unjudgedPairsSql,
   type PairRow,
+  type SameRow,
   type StatRow,
   type UnjudgedRow,
 } from './db.ts'
@@ -53,7 +56,7 @@ let isBackfilling = false
 // PR numbers already recorded in the ledger this session, by their updatedAt,
 // so the poller records an open PR again only when GitHub says it changed.
 const recordedAt = new Map<number, string>()
-const filesBySha = new Map<string, string[] | null>()
+const patchBySha = new Map<string, CommitPatch | null>()
 
 // ---------- gh ----------
 
@@ -109,6 +112,9 @@ async function sql($: EngineInterface, statements: string): Promise<{ ok: boolea
       if (dir) await $.process.run(['mkdir', '-p', dir], { timeoutMs: 10_000 })
       const made = await $.process.run(['sqlite3', '-bail', path], { stdin: SCHEMA, timeoutMs: 30_000 })
       if (made.exitCode !== 0) return { ok: false, rows: [], err: `sqlite3: ${shortError(made.stderr)}` }
+      // Columns added since the first release; each ALTER fails harmlessly
+      // where the column exists, so this run is not bailed on errors.
+      await $.process.run(['sqlite3', path], { stdin: MIGRATIONS.join('\n'), timeoutMs: 30_000 })
       isDbReady = true
     } catch (error) {
       return { ok: false, rows: [], err: `sqlite3: ${error instanceof Error ? error.message : String(error)}` }
@@ -124,40 +130,35 @@ async function sql($: EngineInterface, statements: string): Promise<{ ok: boolea
   }
 }
 
-// The files a commit touched, from the REST API, cached per sha for the session
-// and in the ledger; only asked for commits credited with addressing a thread.
-async function commitFiles($: EngineInterface, repo: string, sha: string): Promise<string[] | null> {
-  const cached = filesBySha.get(sha)
+// What a commit changed, from the REST API: the files and each file's diff
+// hunks, so a thread can be checked at the line, not just the file. Cached per
+// sha for the session and in the ledger; asked only for commits credited with
+// addressing a thread.
+async function commitPatch($: EngineInterface, repo: string, sha: string): Promise<CommitPatch | null> {
+  const cached = patchBySha.get(sha)
   if (cached !== undefined) return cached
-  const ran = await gh($, ['api', `repos/${repo}/commits/${sha}`, '--jq', '[.files[].filename]'], 30_000)
-  let files: string[] | null = null
-  if (ran.ok) {
-    try {
-      const parsed = JSON.parse(ran.out) as unknown
-      if (Array.isArray(parsed)) files = parsed.filter((f): f is string => typeof f === 'string')
-    } catch {
-      files = null
-    }
-  }
-  filesBySha.set(sha, files)
-  return files
+  const ran = await gh($, ['api', `repos/${repo}/commits/${sha}`, '--jq', '[.files[] | {filename, patch: ((.patch // "")[0:60000])}]'], 30_000)
+  const patch = ran.ok ? patchFromRest(ran.out) : null
+  patchBySha.set(sha, patch)
+  return patch
 }
 
 async function recordDetail($: EngineInterface, repo: string, detail: PrDetail): Promise<string | null> {
   const known = await sql($, commitFilesSql(repo, detail.number))
   if (!known.ok) return known.err
-  for (const row of known.rows as { sha: string; files: string }[]) {
-    if (!filesBySha.has(row.sha)) {
+  for (const row of known.rows as { sha: string; files: string; hunks: string | null }[]) {
+    // A row written before hunks were kept is refetched once, for the line check.
+    if (!patchBySha.has(row.sha) && row.hunks) {
       try {
-        filesBySha.set(row.sha, JSON.parse(row.files) as string[])
+        patchBySha.set(row.sha, { files: JSON.parse(row.files) as string[], hunks: JSON.parse(row.hunks) as CommitPatch['hunks'] })
       } catch {
-        filesBySha.set(row.sha, null)
+        patchBySha.set(row.sha, null)
       }
     }
   }
   const wanted = new Set(detail.threads.map(t => t.addressedBy).filter((s): s is string => s !== null))
-  for (const sha of wanted) await commitFiles($, repo, sha)
-  const written = await sql($, recordSql(repo, detail, filesBySha, new Date(await $.clock.now()).toISOString()))
+  for (const sha of wanted) await commitPatch($, repo, sha)
+  const written = await sql($, recordSql(repo, detail, patchBySha, new Date(await $.clock.now()).toISOString()))
   if (!written.ok) return written.err
   recordedAt.set(detail.number, detail.updatedAt)
   return null
@@ -213,7 +214,9 @@ async function computeStats($: EngineInterface, repo: string | null, sinceDays: 
   if (!threads.ok) return { report: null, error: threads.err }
   const pairs = await sql($, queries.pairs)
   if (!pairs.ok) return { report: null, error: pairs.err }
-  const report = aggregateStats(threads.rows as StatRow[], pairs.rows as PairRow[], repo, sinceDays, now)
+  const sames = await sql($, queries.sames)
+  if (!sames.ok) return { report: null, error: sames.err }
+  const report = aggregateStats(threads.rows as StatRow[], pairs.rows as PairRow[], sames.rows as SameRow[], repo, sinceDays, now)
   await update($, statsAtom, () => report)
   return { report, error: null }
 }
@@ -247,7 +250,7 @@ async function backfill($: EngineInterface, repo: string, count: number): Promis
       $.ui.status(`pr-pulse backfill ${done}/${numbers.length}`)
     }
     await progress({ message: `judging overlapping findings…` })
-    const judged = await judgePairs($, repo, 400)
+    const judged = await judgePairs($, repo, 800)
     const stats = await computeStats($, repo, null)
     await progress({ running: false, message: `backfilled ${done} PRs${failed ? ` (${failed} failed)` : ''}, judged ${judged.judged} pairs${judged.error ? `; ${judged.error}` : ''}` })
     if (settings.toasts) $.ui.toast(`pr-pulse: backfilled ${done} PRs, ${stats.report?.totalThreads ?? 0} bot findings on record`)

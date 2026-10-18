@@ -237,8 +237,10 @@ export function renderDetail(t: Table, d: DetailData, a: Actions) {
   const W = Math.max(20, d.width)
   const merge = mergeStateWords(pr)
   const totals = checkTotals(pr.checks)
-  const open = pr.threads.filter(x => !x.isResolved)
-  const resolved = pr.threads.filter(x => x.isResolved)
+  const inline = pr.threads.filter(x => x.kind === 'thread')
+  const comments = pr.threads.filter(x => x.kind === 'comment')
+  const open = inline.filter(x => !x.isResolved)
+  const resolved = inline.filter(x => x.isResolved)
   const barWidth = Math.max(8, Math.min(24, Math.floor(W / 4)))
 
   return (
@@ -330,6 +332,12 @@ export function renderDetail(t: Table, d: DetailData, a: Actions) {
         <Text dimColor wrap="truncate-end">
           {'  ✓ '}{resolved.length} resolved
           {resolvedBy(resolved)}
+        </Text>
+      ) : null}
+      {comments.length > 0 ? (
+        <Text dimColor wrap="truncate-end">
+          {'  💬 '}{comments.length} PR-level bot comment{comments.length === 1 ? '' : 's'}, {comments.filter(c => c.hasFindings).length} reporting something:{' '}
+          {comments.slice(0, 4).map(c => `${displayName(c.openedBy)} ${ago(c.openedAt, d.now)}${c.hasFindings ? '' : ' (nothing found)'}`).join(' · ')}
         </Text>
       ) : null}
 
@@ -470,16 +478,22 @@ export function renderStats(t: Table, d: StatsData, a: Actions) {
       ) : null}
       {r && r.bots.length > 0 ? (
         <Text dimColor wrap="truncate-end">
-          {'\n'}{'bot'.padEnd(17)} {'found'.padStart(5)} {'PRs'.padStart(4)} {'used'.padStart(5)} {'dismis'.padStart(6)} {'unk'.padStart(4)} {'open'.padStart(4)} {'used%'.padStart(5)} {'resp'.padStart(6)} {'uniq'.padStart(5)} {'dup'.padStart(4)}
+          {'\n'}{'bot'.padEnd(17)} {'found'.padStart(5)} {'PRs'.padStart(4)} {'used'.padStart(5)} {'code✓'.padStart(5)} {'dismis'.padStart(6)} {'unk'.padStart(4)} {'open'.padStart(4)} {'used%'.padStart(5)} {'resp'.padStart(6)} {'uniq'.padStart(5)} {'dup'.padStart(4)} {'1st'.padStart(4)} {'rep'.padStart(4)}
         </Text>
       ) : null}
       {(r?.bots ?? []).map(b => (
         <Text key={`bot-${b.bot}`} wrap="truncate-end">
           <Text weight="bold">{truncate(b.bot, 17).padEnd(17)}</Text> {String(b.findings).padStart(5)} {String(b.prs).padStart(4)}{' '}
-          <Text color="success">{String(b.used).padStart(5)}</Text> <Text color="error">{String(b.dismissed).padStart(6)}</Text>{' '}
+          <Text color="success">{String(b.used).padStart(5)}</Text> <Text color="success">{String(b.codeVerified).padStart(5)}</Text> <Text color="error">{String(b.dismissed).padStart(6)}</Text>{' '}
           <Text dimColor>{String(b.resolved).padStart(4)}</Text> <Text color="warning">{String(b.open).padStart(4)}</Text>{' '}
           <Text color={b.usedRate !== null && b.usedRate >= 0.6 ? 'success' : b.usedRate !== null && b.usedRate < 0.3 ? 'error' : undefined}>{pct(b.usedRate).padStart(5)}</Text>{' '}
-          {fmtSeconds(b.medianResponseSeconds).padStart(6)} {String(b.unique).padStart(5)} <Text color={b.duplicated > b.unique ? 'warning' : undefined}>{String(b.duplicated).padStart(4)}</Text>
+          {fmtSeconds(b.medianResponseSeconds).padStart(6)} {String(b.unique).padStart(5)} <Text color={b.duplicated > b.unique ? 'warning' : undefined}>{String(b.duplicated).padStart(4)}</Text>{' '}
+          {String(b.firsts).padStart(4)} <Text color={b.repeats > b.firsts ? 'warning' : undefined}>{String(b.repeats).padStart(4)}</Text>
+        </Text>
+      ))}
+      {(r?.bots ?? []).filter(b => b.comments > 0).map(b => (
+        <Text key={`cm-${b.bot}`} dimColor wrap="truncate-end">
+          {'  '}{truncate(b.bot, 17)}: {b.threads} inline threads · {b.comments} PR-level comments, {b.commentsWithFindings} reporting something
         </Text>
       ))}
       {(r?.bots ?? []).map(b => (
@@ -493,11 +507,12 @@ export function renderStats(t: Table, d: StatsData, a: Actions) {
       {(r?.pairs ?? []).map(p => (
         <Text key={`pair-${p.botA}-${p.botB}`} wrap="truncate-end">
           {'  '}{p.botA} × {p.botB}: <Text color={p.judged && p.same / p.judged > 0.4 ? 'warning' : undefined}>{p.same} same</Text> of {p.judged} judged
+          <Text dimColor> ({p.colocated} co-located, {p.similar} similar)</Text>
           {p.unjudged ? <Text dimColor> · {p.unjudged} unjudged</Text> : null}
         </Text>
       ))}
       <Text dimColor wrap={narrow ? 'wrap' : 'truncate-end'}>
-        {'\n'}used = code moved after it (commit touched the file, diff outdated, or reply says fixed) · dismissed = reply says no, no change · unk = resolved, no evidence · resp = median time from push to comment
+        {'\n'}used = code moved after it (diff outdated, commit hunk on the line, or reply says fixed) · code✓ = used with code evidence · dismis = reply says no, no change · unk = resolved, no evidence · resp = median push→comment · 1st/rep = duplicates raised first / repeated after another bot
       </Text>
       <Text dimColor wrap="truncate-end">b back · j judge pending pairs · r recompute · /prs stats 30 · /prs stats all all-repos · /prs db</Text>
     </Box>

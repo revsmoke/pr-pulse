@@ -83,7 +83,7 @@ query($owner: String!, $name: String!, $number: Int!) {
         comments(first: 12) { totalCount nodes {
           author { login __typename } body createdAt url commit { abbreviatedOid } } }
       } }
-      issueComments: comments(last: 40) { nodes { author { login __typename } body createdAt } }
+      issueComments: comments(last: 60) { nodes { id author { login __typename } body createdAt url } }
     }
   }
 }`
@@ -258,7 +258,7 @@ type RawPr = {
       }
     }[]
   }
-  issueComments?: { nodes: { author: RawActor; body: string; createdAt: string }[] }
+  issueComments?: { nodes: { id?: string; author: RawActor; body: string; createdAt: string; url?: string | null }[] }
 }
 type RawRuleset = {
   name: string
@@ -508,6 +508,9 @@ export function parseDetail(json: string, fetchedAt: number, rules: RuleSummary 
     const triggerAt = triggerCommitAt && triggerCommitAt > pr.createdAt ? triggerCommitAt : pr.createdAt
     const responseMs = Date.parse(openedAt) - Date.parse(triggerAt)
     return {
+      kind: 'thread',
+      hasFindings: true,
+      originalLine: t.originalLine ?? null,
       body: squash(first?.body ?? ''),
       lastReplyBody: last ? squash(last.body) : null,
       triggerSha,
@@ -532,12 +535,51 @@ export function parseDetail(json: string, fetchedAt: number, rules: RuleSummary 
       url: first?.url ?? null,
     }
   })
+  // A bot's PR-level comment (a review summary, a "no issues found") is a
+  // finding of another kind: no file, no resolution, but a response time and
+  // a text that may duplicate what another bot said in a thread.
+  for (const c of pr.issueComments?.nodes ?? []) {
+    const login = c.author?.login ?? ''
+    if (!login || !isBotLogin(login, c.author?.__typename) || !c.id) continue
+    const before = commits.filter(x => x.at <= c.createdAt)
+    const trigger = before[before.length - 1]
+    const triggerAt = trigger && trigger.at > pr.createdAt ? trigger.at : pr.createdAt
+    const responseMs = Date.parse(c.createdAt) - Date.parse(triggerAt)
+    threads.push({
+      id: c.id,
+      kind: 'comment',
+      hasFindings: commentHasFindings(c.body),
+      path: '',
+      line: null,
+      originalLine: null,
+      isResolved: false,
+      isOutdated: false,
+      resolvedBy: null,
+      severity: severityOf(c.body),
+      title: titleOf(c.body),
+      openedBy: login,
+      openedByIsBot: true,
+      openedAt: c.createdAt,
+      replies: 0,
+      lastReplyBy: null,
+      lastReplyAt: null,
+      commitsSince: commits.filter(x => x.at > c.createdAt).length,
+      addressedBy: null,
+      url: c.url ?? null,
+      body: squash(c.body),
+      lastReplyBody: null,
+      triggerSha: trigger?.sha ?? null,
+      triggerAt,
+      responseSeconds: Number.isFinite(responseMs) && responseMs >= 0 ? Math.round(responseMs / 1000) : null,
+    })
+  }
   for (const t of threads) {
     if (!t.isResolved || !t.addressedBy) continue
     const c = commits.find(x => x.sha === t.addressedBy)
     if (c) c.threadsAddressed += 1
   }
   threads.sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === 'thread' ? -1 : 1
     if (a.isResolved !== b.isResolved) return a.isResolved ? 1 : -1
     return a.openedAt < b.openedAt ? 1 : -1
   })
@@ -589,6 +631,16 @@ export function parseDetail(json: string, fetchedAt: number, rules: RuleSummary 
     commits: commits.slice().reverse(),
     activity: folded.slice(0, 12),
   }
+}
+
+// A PR-level bot comment that reports nothing (a walkthrough, "no issues
+// found", a review-state marker) is recorded but not counted as a finding.
+export function commentHasFindings(body: string): boolean {
+  const text = body.replace(/<!--[\s\S]*?-->/g, ' ')
+  if (/no issues? found|no (problems|concerns|findings)|lgtm|looks good to me|nothing to flag|approved with no/i.test(text)) return false
+  if (/^\s*(## |### )?(walkthrough|summary by coderabbit|review summary|pull request overview)/im.test(text) && !/\b(bug|issue|fix|should|must|missing|incorrect|vulnerab|leak|race|error)\b/i.test(text)) return false
+  if (/^\s*@\w+\s+(review|retry|help)\s*$/i.test(text)) return false
+  return text.replace(/\s+/g, ' ').trim().length > 40
 }
 
 export function squash(text: string): string {

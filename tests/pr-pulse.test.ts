@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { aggregateStats, candidatePairs, formatStats, outcomeOf, parseJudgement, recordSql, type PairRow, type StatRow } from '../hooks/db.ts'
-import { coAuthorsOf, diffSnapshots, parseDetail, parseList, severityOf, statusLineOf, titleOf } from '../hooks/github.ts'
+import { aggregateStats, candidatePairs, formatStats, outcomeOf, parseHunks, parseJudgement, patchFromRest, recordSql, similarity, touchesLine, type PairRow, type SameRow, type StatRow } from '../hooks/db.ts'
+import { coAuthorsOf, commentHasFindings, diffSnapshots, parseDetail, parseList, severityOf, statusLineOf, titleOf } from '../hooks/github.ts'
 import { DETAIL_JSON, LIST_JSON } from './fixtures.ts'
 
 const PANE_PROPS = {
@@ -42,10 +42,11 @@ function answerProcesses(on: TestOn) {
     if (argv[0] === 'sqlite3') {
       const stdin = e.init?.stdin ?? ''
       sql.push(stdin)
-      if (/^SELECT sha, files FROM commits/m.test(stdin)) return ok('[]')
+      if (/^SELECT sha, files, hunks FROM commits/m.test(stdin)) return ok('[]')
       if (/^SELECT p\.a, p\.b/m.test(stdin)) return ok('[]')
       if (/^SELECT t\.id, t\.number/m.test(stdin)) return ok(JSON.stringify(STAT_ROWS))
-      if (/^SELECT p\.bot_a/m.test(stdin)) return ok(JSON.stringify(PAIR_ROWS))
+      if (/^SELECT p\.bot_a, p\.bot_b, p\.same/m.test(stdin)) return ok(JSON.stringify(PAIR_ROWS))
+      if (/^SELECT p\.bot_a, p\.bot_b, ta\.opened_at/m.test(stdin)) return ok(JSON.stringify(SAME_ROWS))
       return ok('')
     }
     if (argv[0] !== 'gh') return fail('not found', 127)
@@ -53,22 +54,35 @@ function answerProcesses(on: TestOn) {
     if (argv[1] === 'api' && argv[2] === 'graphql' && /pullRequests\(states: OPEN/.test(joined)) return ok(LIST_JSON)
     if (argv[1] === 'api' && argv[2] === 'graphql' && /pullRequests\(states: \[MERGED, CLOSED\]/.test(joined)) return ok(JSON.stringify({ data: { repository: { pullRequests: { nodes: [{ number: 42, state: 'MERGED', updatedAt: '' }] } } } }))
     if (argv[1] === 'api' && argv[2] === 'graphql' && /pullRequest\(number: \$number\)/.test(joined)) return ok(DETAIL_JSON)
-    if (argv[1] === 'api' && /^repos\/acme-labs\/widget-forge\/commits\//.test(argv[2] ?? '')) return ok(JSON.stringify(['forge/export.ts', 'forge/routes.ts']))
+    if (argv[1] === 'api' && /^repos\/acme-labs\/widget-forge\/commits\//.test(argv[2] ?? '')) return ok(JSON.stringify(PATCH_REST))
     return fail(`unexpected gh call: ${joined.slice(0, 80)}`)
   })
   return { calls, sql }
 }
 
+const PATCH_REST = [
+  { filename: 'forge/export.ts', patch: '@@ -80,12 +80,20 @@ export async function run()\n-old\n+new\n@@ -130,3 +138,9 @@\n-a\n+b' },
+  { filename: 'forge/routes.ts', patch: '@@ -10,6 +10,8 @@\n-x\n+y' },
+  { filename: 'assets/logo.png', patch: null },
+]
+
 const STAT_ROWS: StatRow[] = [
-  { id: 't1', number: 42, bot: 'Codex', severity: 'P1', response_seconds: 300, outcome: 'used', dup: 1 },
-  { id: 't2', number: 42, bot: 'Codex', severity: 'P2', response_seconds: 420, outcome: 'open', dup: 0 },
-  { id: 't3', number: 42, bot: 'CodeRabbit', severity: 'Minor', response_seconds: 700, outcome: 'dismissed', dup: 1 },
-  { id: 't4', number: 43, bot: 'CodeRabbit', severity: 'Minor', response_seconds: 500, outcome: 'used', dup: 0 },
-  { id: 't5', number: 43, bot: 'Cursor Bugbot', severity: 'High', response_seconds: null, outcome: 'resolved', dup: 0 },
+  { id: 't1', number: 42, bot: 'Codex', kind: 'thread', has_findings: 1, severity: 'P1', response_seconds: 300, outcome: 'used', is_outdated: 1, addressed_touched_line: 1, dup: 1 },
+  { id: 't2', number: 42, bot: 'Codex', kind: 'thread', has_findings: 1, severity: 'P2', response_seconds: 420, outcome: 'open', is_outdated: 0, addressed_touched_line: null, dup: 0 },
+  { id: 't3', number: 42, bot: 'CodeRabbit', kind: 'thread', has_findings: 1, severity: 'Minor', response_seconds: 700, outcome: 'dismissed', is_outdated: 0, addressed_touched_line: 0, dup: 1 },
+  { id: 't4', number: 43, bot: 'CodeRabbit', kind: 'thread', has_findings: 1, severity: 'Minor', response_seconds: 500, outcome: 'used', is_outdated: 0, addressed_touched_line: 0, dup: 0 },
+  { id: 't5', number: 43, bot: 'Cursor Bugbot', kind: 'thread', has_findings: 1, severity: 'High', response_seconds: null, outcome: 'resolved', is_outdated: 0, addressed_touched_line: null, dup: 0 },
+  { id: 'c1', number: 42, bot: 'Claude Code', kind: 'comment', has_findings: 0, severity: null, response_seconds: 60, outcome: 'comment', is_outdated: 0, addressed_touched_line: null, dup: 0 },
+  { id: 'c2', number: 42, bot: 'Claude Code', kind: 'comment', has_findings: 1, severity: null, response_seconds: 90, outcome: 'comment', is_outdated: 0, addressed_touched_line: null, dup: 1 },
 ]
 const PAIR_ROWS: PairRow[] = [
-  { bot_a: 'Codex', bot_b: 'CodeRabbit', same: 1, n: 1 },
-  { bot_a: 'CodeRabbit', bot_b: 'Cursor Bugbot', same: null, n: 2 },
+  { bot_a: 'Codex', bot_b: 'CodeRabbit', same: 1, basis: 'colocated', n: 1 },
+  { bot_a: 'Claude Code', bot_b: 'Cursor Bugbot', same: 1, basis: 'similar', n: 1 },
+  { bot_a: 'CodeRabbit', bot_b: 'Cursor Bugbot', same: null, basis: 'colocated', n: 2 },
+]
+const SAME_ROWS: SameRow[] = [
+  { bot_a: 'Codex', bot_b: 'CodeRabbit', at_a: '2026-03-01T09:08:00Z', at_b: '2026-03-01T09:12:00Z' },
+  { bot_a: 'Claude Code', bot_b: 'Cursor Bugbot', at_a: '2026-03-01T09:11:00Z', at_b: '2026-03-01T09:10:00Z' },
 ]
 
 test('parsers read the live shapes: rules, checks, bots, agents, severities', () => {
@@ -93,7 +107,7 @@ test('parsers read the live shapes: rules, checks, bots, agents, severities', ()
   expect(detail.commits[0]?.sessionUrl).toMatch(/^https:\/\/claude\.ai\//)
   expect(detail.threads.filter(t => t.isResolved).length).toBe(5)
   expect(detail.commits.find(c => c.sha === 'b2c3d4e')?.threadsAddressed).toBe(5)
-  const open = detail.threads.filter(t => !t.isResolved)
+  const open = detail.threads.filter(t => t.kind === 'thread' && !t.isResolved)
   expect(open.length).toBeGreaterThan(0)
   expect(open.every(t => t.severity !== null)).toBe(true)
   expect(detail.commits.reduce((n, c) => n + c.threadsAddressed, 0)).toBeGreaterThan(0)
@@ -127,33 +141,67 @@ test('ledger rules: outcomes, candidate pairs, SQL and judgement parsing', () =>
   const detail = parseDetail(DETAIL_JSON, 1, snap.rules)
   const byPath = (p: string, line: number) => detail.threads.find(t => t.path === p && t.line === line)!
 
-  // Resolved, reply says fixed, commit touched the file: used.
-  expect(outcomeOf(byPath('forge/export.ts', 88), true)).toBe('used')
-  // Resolved with no reply and no file evidence: unknown.
-  expect(outcomeOf({ ...byPath('forge/export.ts', 88), lastReplyBody: null, isOutdated: false }, null)).toBe('resolved')
+  // Resolved, reply says fixed: used.
+  expect(outcomeOf(byPath('forge/export.ts', 88), true, true)).toBe('used')
+  // Resolved, no reply, file touched but not the line, diff not outdated: unknown.
+  expect(outcomeOf({ ...byPath('forge/export.ts', 88), lastReplyBody: null, isOutdated: false }, true, false)).toBe('resolved')
+  // Resolved, no reply, but the addressing hunk reaches the line: used.
+  expect(outcomeOf({ ...byPath('forge/export.ts', 88), lastReplyBody: null, isOutdated: false }, true, true)).toBe('used')
   // Resolved with a refusing reply and nothing touched: dismissed.
-  expect(outcomeOf({ ...byPath('forge/export.ts', 88), lastReplyBody: 'False positive, the guard runs upstream.', isOutdated: false }, false)).toBe('dismissed')
-  // Still open.
+  expect(outcomeOf({ ...byPath('forge/export.ts', 88), lastReplyBody: 'False positive, the guard runs upstream.', isOutdated: false }, false, false)).toBe('dismissed')
+  // Still open; a PR-level comment is its own kind.
   expect(outcomeOf(byPath('forge/export.ts', 133), null)).toBe('open')
+  const byId = (id: string) => detail.threads.find(t => t.id === id)!
+  expect(byId('IC_1')).toMatchObject({ kind: 'comment', openedBy: 'coderabbitai', hasFindings: false })
+  expect(byId('IC_2')).toMatchObject({ kind: 'comment', openedBy: 'claude', hasFindings: false })
+  expect(byId('IC_3')).toMatchObject({ kind: 'comment', openedBy: 'claude', hasFindings: true })
+  expect(detail.threads.some(t => t.id === 'IC_4')).toBe(false)
+  expect(detail.threads.find(t => t.id === 'IC_3')?.responseSeconds).toBe(6 * 60)
+  expect(commentHasFindings('## Code review\n\nNo issues found.')).toBe(false)
+  expect(commentHasFindings('@codex review')).toBe(false)
+
+  // Hunks: `@@ -a,b +c,d @@` headers, a missing patch, and the line check with slack.
+  const patch = patchFromRest(JSON.stringify(PATCH_REST))!
+  expect(patch.files).toEqual(['forge/export.ts', 'forge/routes.ts', 'assets/logo.png'])
+  expect(patch.hunks['forge/export.ts']).toEqual([[80, 12, 80, 20], [130, 3, 138, 9]])
+  expect(parseHunks('@@ -1 +1,2 @@')).toEqual([[1, 1, 1, 2]])
+  expect(touchesLine(patch, { path: 'forge/export.ts', line: 88, originalLine: 88 })).toBe(true)
+  expect(touchesLine(patch, { path: 'forge/export.ts', line: 120, originalLine: 120 })).toBe(false)
+  expect(touchesLine(patch, { path: 'forge/export.ts', line: 133, originalLine: 133 })).toBe(true)
+  expect(touchesLine(patch, { path: 'forge/audit.ts', line: 9, originalLine: 9 })).toBe(false)
+  expect(touchesLine(patch, { path: 'assets/logo.png', line: 1, originalLine: 1 })).toBeNull()
+  expect(touchesLine(null, { path: 'forge/export.ts', line: 88, originalLine: 88 })).toBeNull()
   // Response time: measured from the commit the comment is anchored on (09:05) to the comment (09:08).
   expect(byPath('forge/export.ts', 88).responseSeconds).toBe(3 * 60)
   expect(byPath('forge/export.ts', 133).triggerSha).toBe('c3d4e5f')
 
   // Codex 133 and CodeRabbit 61 are 72 lines apart: no pair. Codex 88 / CodeRabbit 120: no. Codex 88 / CodeRabbit 40 (48 apart): no.
   // Cursor 14 / Cursor 30 are the same bot: no pair. Codex 133 (export.ts) vs CodeRabbit 120 (export.ts): 13 apart: no.
-  const pairs = candidatePairs(detail.threads, 50)
-  expect(pairs.length).toBeGreaterThan(0)
-  expect(pairs.every(([a, b]) => a.path === b.path && a.openedBy !== b.openedBy && a.id < b.id)).toBe(true)
-  expect(candidatePairs(detail.threads, 8).length).toBe(0)
+  const wide = candidatePairs(detail.threads, 50)
+  expect(wide.filter(c => c.basis === 'colocated').length).toBeGreaterThan(0)
+  expect(wide.every(c => c.a.openedBy !== c.b.openedBy && c.a.id < c.b.id)).toBe(true)
+  expect(wide.filter(c => c.basis === 'colocated').every(c => c.a.path === c.b.path)).toBe(true)
+  // With the window closed, only wording-similar pairs remain: Cursor's auth-guard
+  // thread and Claude Code's PR-level comment about the same guard.
+  const narrow = candidatePairs(detail.threads, 8)
+  expect(narrow.every(c => c.basis === 'similar')).toBe(true)
+  expect(narrow.some(c => [c.a.id, c.b.id].includes('IC_3') && [c.a.openedBy, c.b.openedBy].includes('cursor'))).toBe(true)
+  expect(narrow.some(c => [c.a.id, c.b.id].includes('IC_2'))).toBe(false)
+  expect(similarity('Export route skips the auth guard middleware', 'the export route is registered before the guard middleware')).toBeGreaterThan(0.22)
+  expect(similarity('Bound the batch size', 'Record who ran the export')).toBe(0)
 
-  const files = new Map<string, string[] | null>([['b2c3d4e', ['forge/export.ts', 'forge/routes.ts']]])
+  const files = new Map([['b2c3d4e', patch]])
   const statements = recordSql('acme-labs/widget-forge', detail, files, '2026-03-02T00:00:00Z')
   expect(statements.startsWith('BEGIN;')).toBe(true)
   expect(statements).toContain("INSERT INTO prs (")
   expect(statements).toContain("'Codex'")
   expect(statements).toContain("'used'")
   expect(statements).toContain("'open'")
-  expect(statements).toMatch(/INSERT INTO commits .*'b2c3d4e'.*\["forge\/export\.ts","forge\/routes\.ts"\]/)
+  expect(statements).toMatch(/INSERT INTO commits .*'b2c3d4e'.*\["forge\/export\.ts","forge\/routes\.ts","assets\/logo\.png"\]/)
+  expect(statements).toContain("'comment', 1, NULL, NULL)")
+  // With the default 8-line window these fixtures yield one wording-similar pair.
+  expect(statements).toContain("'similar')")
+  expect(statements).not.toContain("'colocated')")
   expect(statements.endsWith('COMMIT;')).toBe(true)
   // Quotes in titles are doubled, never left to break the statement.
   expect(statements).toContain("export''s")
@@ -164,26 +212,44 @@ test('ledger rules: outcomes, candidate pairs, SQL and judgement parsing', () =>
 })
 
 test('stats aggregation: per-bot rates, medians, uniqueness and overlap', () => {
-  const report = aggregateStats(STAT_ROWS, PAIR_ROWS, 'acme-labs/widget-forge', 30, 1_000)
+  const report = aggregateStats(STAT_ROWS, PAIR_ROWS, SAME_ROWS, 'acme-labs/widget-forge', 30, 1_000)
   const codex = report.bots.find(b => b.bot === 'Codex')!
   expect(codex.findings).toBe(2)
   expect(codex.used).toBe(1)
+  expect(codex.codeVerified).toBe(1)
   expect(codex.open).toBe(1)
   expect(codex.usedRate).toBe(1)
   expect(codex.medianResponseSeconds).toBe(360)
   expect(codex.duplicated).toBe(1)
   expect(codex.unique).toBe(1)
+  expect(codex.firsts).toBe(1)
+  expect(codex.repeats).toBe(0)
   const rabbit = report.bots.find(b => b.bot === 'CodeRabbit')!
   expect(rabbit.usedRate).toBe(0.5)
+  expect(rabbit.codeVerified).toBe(0)
   expect(rabbit.prs).toBe(2)
+  expect(rabbit.repeats).toBe(1)
   const cursor = report.bots.find(b => b.bot === 'Cursor Bugbot')!
   expect(cursor.usedRate).toBe(0)
   expect(cursor.medianResponseSeconds).toBeNull()
-  expect(report.pairs.find(p => p.botA === 'CodeRabbit' && p.botB === 'Codex')?.same).toBe(1)
+  expect(cursor.firsts).toBe(1)
+  // PR-level comments: only the reporting one counts as a finding; no outcome math.
+  const claude = report.bots.find(b => b.bot === 'Claude Code')!
+  expect(claude.findings).toBe(1)
+  expect(claude.comments).toBe(2)
+  expect(claude.commentsWithFindings).toBe(1)
+  expect(claude.usedRate).toBeNull()
+  expect(claude.repeats).toBe(1)
+  expect(claude.medianResponseSeconds).toBe(75)
+  const pair = report.pairs.find(p => p.botA === 'Claude Code' && p.botB === 'Cursor Bugbot')!
+  expect(pair.same).toBe(1)
+  expect(pair.similar).toBe(1)
+  expect(report.pairs.find(p => p.botA === 'CodeRabbit' && p.botB === 'Codex')?.colocated).toBe(1)
   expect(report.unjudgedPairs).toBe(2)
+  expect(report.totalThreads).toBe(6)
   const text = formatStats(report)
-  expect(text).toContain('5 findings across 2 PRs')
-  expect(text).toMatch(/Codex\s+2\s+1\s+1\s+0\s+0\s+1\s+100%/)
+  expect(text).toContain('6 findings across 2 PRs')
+  expect(text).toMatch(/Codex\s+2\s+2\s+0\/0\s+1\s+1\s+1\s+0\s+0\s+1\s+100%/)
   expect(text).toContain('/prs judge')
 })
 
@@ -225,6 +291,8 @@ test('drilling into a PR writes it to the ledger, and backfill sweeps settled PR
   expect(await ui.find({ text: /review bots/ })).toBeDefined()
   expect(await ui.find({ text: /Codex/ })).toBeDefined()
   expect(await ui.find({ text: /CodeRabbit × Cursor Bugbot/ })).toBeDefined()
+  expect(await ui.find({ text: /Claude Code × Cursor Bugbot/ })).toBeDefined()
+  expect(await ui.find({ text: /PR-level comments, 1 reporting something/ })).toBeDefined()
   await ui.press({ key: 'back' })
   expect(await ui.find({ key: 'open-42' })).toBeDefined()
   await ui.unmount()

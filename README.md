@@ -47,17 +47,28 @@ the stats view, `j` judges pending pairs.
 
 ## How the ledger scores a finding
 
-- **used**: the thread was resolved and the code moved after it: the first
-  commit after the comment touched its file, the diff under it went outdated,
-  or the reply says fixed/done/applied.
+- **findings**: inline review threads plus PR-level bot comments that report
+  something (a "no issues found" or a walkthrough is recorded but not counted).
+  That is how the Claude Code review action and summary-style bots are seen.
+- **used**: the thread was resolved and the code moved under it: GitHub marked
+  the diff outdated, the first commit after the comment has a hunk reaching the
+  flagged line (with three lines of slack), or the reply says fixed/done/applied.
+- **code-verified**: used with code evidence (outdated diff or hunk on the
+  line), as opposed to a reply alone.
 - **dismissed**: resolved with a reply like won't fix, false positive, by
-  design, and no code change.
-- **unknown**: resolved with no evidence either way.
+  design, and no change on the line.
+- **unknown**: resolved with no evidence either way (including a commit that
+  touched the file but not the line).
 - **open**: still unresolved.
 - **response**: seconds from the commit the comment is anchored on (or the PR
   opening) to the comment.
-- **duplicated**: another bot commented on the same file within 8 lines and the
-  model judged the two comments to report the same issue.
+- **duplicated**: another bot's finding on the same PR that the model judged
+  to report the same issue. Candidates are co-located (same file within 8
+  lines) or similar (enough words in common anywhere in the PR, PR-level
+  comments included); each is settled by one low-effort Haiku call.
+- **first / repeat**: among duplicated findings, how many this bot raised
+  before the other bot, and how many it repeated after another bot had already
+  said it. A bot that is mostly "repeat" adds little on top of the others.
 
 The ledger is written whenever the pane loads a PR's detail, when the poller
 sees an open PR change, when a PR settles, and by `/prs backfill`. Query it
