@@ -181,6 +181,8 @@ export function titleOf(body: string): string {
     const t = line.replace(/^#+\s*/, '').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim()
     if (t.length < 4) continue
     if (/^(P[0-3]|Critical|Major|Minor|High|Medium|Low)\b[\s|]*$/i.test(t)) continue
+    // Tool badges CodeRabbit and others prepend ("🔎 Supported by static analysis", "🛠️ Refactor suggestion").
+    if (/supported by static analysis|refactor suggestion|verification agent|potential issue|^[\p{Extended_Pictographic}\uFE0F\s]+\S+( \S+){0,3}$/iu.test(t) && t.length < 48) continue
     return t.length > 140 ? `${t.slice(0, 137)}…` : t
   }
   return '(comment)'

@@ -121,6 +121,8 @@ test('severity and title heuristics cover Codex, CodeRabbit and Cursor comment s
   expect(severityOf('### Raise uniqueness\n\n**High Severity**\n\nbody')).toBe('High')
   expect(titleOf('**🎯 Functional Correctness** | **🟡 Minor** | **⚡ Quick win**\n\n**Include `answered` in the filter.**')).toBe('Include `answered` in the filter.')
   expect(titleOf('### Project admins cannot raise issues\n\n**Medium Severity**')).toBe('Project admins cannot raise issues')
+  expect(titleOf('_🔎 Supported by static analysis_\n\n**Guard the null token before refreshing.**\n\nDetails...')).toBe('Guard the null token before refreshing.')
+  expect(titleOf('_🛠️ Refactor suggestion_\n\n**Extract the retry loop.**')).toBe('Extract the retry loop.')
   expect(coAuthorsOf('Fix\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/x')).toEqual(['Claude Fable 5.1'])
 })
 
