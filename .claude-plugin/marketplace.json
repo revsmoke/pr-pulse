@@ -1,0 +1,13 @@
+{
+  "name": "pr-pulse",
+  "owner": {
+    "name": "Bryan Rice"
+  },
+  "plugins": [
+    {
+      "name": "pr-pulse",
+      "source": "./"
+    }
+  ],
+  "description": "Claude Code mod: a live pane of a repo's open pull requests, their checks, review bots, branch rules, review threads and the agents working on them."
+}

@@ -1,0 +1,35 @@
+{
+  "name": "pr-pulse",
+  "version": "0.1.0",
+  "description": "Live pane of a repo's open pull requests: checks, review bots, enforced rules, review threads and the commits that address them, and which agents are working on each PR.",
+  "author": {
+    "name": "Bryan Rice"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "pollSeconds": {
+      "type": "number",
+      "description": "How often to ask GitHub for fresh PR status, in seconds.",
+      "default": 45,
+      "title": "Poll interval (seconds)"
+    },
+    "autoOpen": {
+      "type": "boolean",
+      "description": "Open the PR pane on session start when the repo has open pull requests.",
+      "default": true,
+      "title": "Open pane automatically"
+    },
+    "statusLine": {
+      "type": "boolean",
+      "description": "Pin a one-line PR summary under the prompt while the repo has open pull requests.",
+      "default": true,
+      "title": "Status line summary"
+    },
+    "toasts": {
+      "type": "boolean",
+      "description": "Toast when a check fails, a reviewer leaves new threads, or a PR merges.",
+      "default": true,
+      "title": "Toasts on changes"
+    }
+  }
+}
