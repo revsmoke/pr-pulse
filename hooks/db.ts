@@ -332,7 +332,9 @@ export function aggregateStats(rows: StatRow[], pairRows: PairRow[], sameRows: S
         resolved,
         open: count('open'),
         usedRate: settled ? used / settled : null,
-        medianResponseSeconds: median(list.map(r => r.response_seconds).filter((v): v is number => v !== null)),
+        // Inline threads only, so a bot's quick status posts do not flatter it;
+        // a bot that only comments at PR level is measured on those.
+        medianResponseSeconds: median((threads.length ? threads : comments).map(r => r.response_seconds).filter((v): v is number => v !== null)),
         duplicated,
         unique: findings - duplicated,
         firsts: firsts.get(bot) ?? 0,
@@ -413,7 +415,7 @@ export function formatStats(r: StatsReport): string {
   lines.push('findings = inline review threads + PR-level comments that report something (PR-comments shows reporting/total).')
   lines.push('used = resolved and the code moved: GitHub marked the diff outdated, the addressing commit touched the flagged line, or the reply says fixed.')
   lines.push('code-verified = used with code evidence (outdated diff or hunk on the line), not just a reply. dismissed = reply says no, nothing moved. unknown = resolved without evidence.')
-  lines.push('first/repeat = of findings the model judged the same as another bot\'s, how many this bot raised first vs repeated after another bot.')
+  lines.push('first/repeat = of findings the model judged the same as another bot\'s, how many this bot raised first vs repeated after another bot. median response = push to inline comment.')
   if (r.pairs.length) {
     lines.push('', 'overlap between bots (same finding, judged by the model; co-located = same file within 8 lines, similar = wording match anywhere in the PR):')
     for (const p of r.pairs) {
